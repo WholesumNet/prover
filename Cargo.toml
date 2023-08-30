@@ -1,0 +1,21 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = {version = "1.0", features = ["derive"]}
+toml = "0.7"
+async-std = { version = "1.12", features = ["attributes"] }
+async-trait = "0.1"
+env_logger = "0.10.0"
+futures = "0.3.28"
+libp2p = { version = "0.52.1", features = ["async-std", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
+libp2p-quic = { version = "0.8.0-alpha", features = ["async-std"] }
+num_enum = "0.6.1"
+clap = { version = "4.3.21", features = ["derive"] }
+uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
+
+comms = {path = "../comms"}
