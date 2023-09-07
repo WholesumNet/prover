@@ -9,15 +9,16 @@ use libp2p::{
     tcp, yamux, PeerId, Transport,
 };
 use libp2p_quic as quic;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use clap::Parser;
+use uuid::Uuid;
 use comms::{notice, compute};
 
-mod docker_utils;
+mod job;
 
 // CLI
 #[derive(Parser, Debug)]
@@ -41,8 +42,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     let cli = Cli::parse();
     
-    // pending jobs 
-    // let mut pending_jobs = HashMap::<u128, job::ComputeJob>::new();
+    // running jobs(docker containers)
+    let mut docker_job_stream = job::DockerJob::new();
+    let mut running_jobs = HashMap::<String, job::JobInfo>::new();
+    // jobs awaiting verification
+    let mut to_be_verified_jobs = HashMap::<String, job::JobInfo>::new();
+    // jobs waiting to be collected
+    let mut to_be_collected_jobs = HashMap::<String, job::JobInfo>::new();
+    // zombie jobs
 
     // get a random peer_id
     let id_keys = identity::Keypair::generate_ed25519();
@@ -153,9 +160,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     //          msg_str);
                     println!("received gossip message: {:#?}", message);
                     // first byte is message identifier                
-                    let need_req = notice::NeedRequest::try_from(message.data[0])?;
-                    match need_req {
-                        notice::NeedRequest::Computation => {
+                    let notice_req = notice::Notice::try_from(message.data[0])?;
+                    match notice_req {
+                        notice::Notice::Compute => {
                             println!("`need compute` request from client: `{peer_id}`");
                             // engage with the client through a direct p2p channel
                             // and express interest in getting the compute done
@@ -176,7 +183,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             println!("compute offer was sent to client, id: {sw_req_id}");
                         },
 
-                        notice::NeedRequest::Verification => {                            
+                        notice::Notice::Verify => {                            
                             println!("`need verify` request from client: `{peer_id}`");
                             // engage with the client through a direct p2p channel
                             let sw_req_id = swarm
@@ -185,13 +192,53 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     &peer_id,
                                     notice::Request::Verify,
                                 );
-                            println!("verification offer was sent, id: {sw_req_id}")
+                            println!("verification offer was sent, id: {sw_req_id}");
                         },
+
+                        notice::Notice::JobStatus => {
+                            // job status inquiry 
+                            // bytes [1-16] determine th job id 
+                            let bytes_id = match message.data[1..=17].try_into() {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    println!("Invalid job id, {e:?}");
+                                    continue;
+                                },
+                            };
+                            let job_id = Uuid::from_bytes(bytes_id).to_string();
+                            println!("`job-status` request from client: `{}`, job_id: `{}`",
+                                peer_id, job_id);
+                            let job_status;
+                            // this is a stronger check that the `running_jobs` key existance
+                            if docker_job_stream.is_job_running(&job_id) {
+                                job_status = compute::JobStatus::Running;
+                            } else {
+                                if to_be_verified_jobs.contains_key(&job_id) {
+                                    // awaits verification
+                                    job_status = compute::JobStatus::ToBeVerified;
+
+                                } else if to_be_collected_jobs.contains_key(&job_id) {
+                                    // awaits collection
+                                    job_status = compute::JobStatus::ToBeCollected;
+
+                                } else {
+                                    // unknown
+                                    job_status = compute::JobStatus::Unknown;
+                                }
+                            }
+                            let sw_req_id = swarm
+                                .behaviour_mut().req_resp
+                                .send_request(
+                                    &peer_id,
+                                    notice::Request::Verify,
+                                );
+                            println!("Job result was sent to the client. req_id: `{sw_req_id}`");
+                        }
                     };
                 },
 
                 // incoming compute/verify request(interest actually)
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
+                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: sender_peer_id,
                     message: request_response::Message::Request {
                         //request,
@@ -206,34 +253,58 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 // incoming response to an earlier compute/verify offer
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
-                    peer: sender_peer_id,
+                    peer: peer_id,
                     message: request_response::Message::Response {
-                        request_id,
                         response,
+                        ..
                     }
-                })) => {                                
-                    println!("response came from {}, req_id: {:#?}",
-                        sender_peer_id, request_id);
+                })) => {                    
                     match response {
                         notice::Response::DeclineOffer => {
-                            println!("Offer decliend by client.");
-                        },
+                            println!("Offer decliend by the client: `{peer_id}`");
+                        },                        
 
                         notice::Response::Compute(compute_job) => {
-                            
+                            let mut spawn_error = |e: String| {
+                                println!("{e}");
+                                // notify client
+                                let sw_req_id = swarm
+                                    .behaviour_mut().req_resp
+                                    .send_request(
+                                        &peer_id,
+                                        notice::Request::JobResult(
+                                            compute::JobResult {
+                                                id: compute_job.id.clone(),
+                                                status: compute::JobStatus::FinishedWithError(e),
+                                            }
+                                        ),
+                                    );
+                                println!("Client has been notified about this failure. req_id: {sw_req_id}");
+                            };
+
                             println!("recived `compute job` request from client: {}, job: {:#?}",
-                                sender_peer_id, compute_job);
-                            // let cmd = String::from("docker run test-risc0 sh -c '/root/risc0-0.17.0/examples/target/release/factors'");
-                            // let dir = String::from("/root/risc0-0.17.0/examples/factors");
-                            let (exit_code, stderr, stdout) = docker_utils::run_docker_image(
-                                compute_job.details.docker_image,
-                                compute_job.details.command
-                            );
-                                
-                            println!(
-                                "docker execution finished. \
-                                exit_code: `{}`, stdout: `{}`, stderr: `{}`",
-                                exit_code, stdout, stderr
+                                peer_id, compute_job);                           
+                            // no duplicate jobs are allowed
+                            if running_jobs.contains_key(&compute_job.id) {
+                                spawn_error("Duplicate job id.".to_string());
+                                continue;
+                            }
+                            // schedule the job to run                            
+                            if let Err(e) = docker_job_stream.add_job(
+                                compute_job.id.clone(),
+                                compute_job.details.docker_image.clone(),
+                                compute_job.details.command.clone()) {
+
+                                spawn_error(format!("Job spawn error: `{e:?}`"));
+                                continue;
+                            }
+                            // keep track of running jobs
+                            running_jobs.insert(
+                                compute_job.id,
+                                job::JobInfo { 
+                                    owner: peer_id,
+                                    job_details: compute_job.details,
+                                }
                             );
                         },
 
@@ -248,6 +319,74 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 _ => {}
 
+            },
+            // docker job is finished, get in touch with the client
+            mut job_handle = docker_job_stream.select_next_some() => {
+                println!("Docker job `{}` has been finished.", job_handle.id);
+                //@ collect any relevant objects before terminating process
+                let exit_code = match job_handle.child.status().await {
+                    Ok(status) => status.code().unwrap_or_else(
+                        || {
+                            println!("Docker process terminated by signal.");
+                            101 // @ retrieve signal
+                        }
+                    ),
+                    Err(e) => {
+                        println!("Failed to collect docker process's exit status: {e:?}");
+                        102
+                    }
+                };
+
+                //@ stdout/stderr can be quite large so how about moving them into streams? 
+                // collect stdout and stderr
+                let mut stdout_buffer = String::new();
+                if let Some(mut stdout) = job_handle.child.stdout {
+                    //@ can even ignore errors :)
+                    if let Err(e) = stdout.read_to_string(&mut stdout_buffer).await {
+                        stdout_buffer = format!("Failed to capture stdout: {e:?}");
+                        // println!("stdout: `{stdout_buffer}`");
+                    }
+                }
+                let mut stderr_buffer = String::new();
+                if let Some(mut stderr) = job_handle.child.stderr {
+                    if let Err(e) = stderr.read_to_string(&mut stderr_buffer).await {
+                        stderr_buffer = format!("Failed to capture stderr: {e:?}");
+                        // println!("stderr: `{stderr_buffer}`");
+                    }
+                }
+                println!("docker container execution is terminated. \
+                    exit_code: `{}`\n, stderr: `{}`\n, stdout: `{}`",
+                    exit_code, stderr_buffer, stdout_buffer); 
+                // job is ready to be verified now
+                // notify client that the job has been executed
+                if false == running_jobs.contains_key(&job_handle.id) {
+                    println!("Critical error: container's job info is missing.");
+                    //@ what to do with zombie jobs?
+                    continue;
+                }
+                let job_info = running_jobs.remove(&job_handle.id).unwrap();
+
+                let job_result;
+                if exit_code == 0 {
+                    job_result = compute::JobResult {
+                        id: job_handle.id,
+                        status: compute::JobStatus::ToBeVerified,
+                    };
+                } else {
+                    job_result = compute::JobResult {
+                        id: job_handle.id,
+                        status: compute::JobStatus::FinishedWithError("".to_string()), //@ report stderr, ...
+                    };                    
+                }
+                // running_jobs.retain(|&k, _| k != job_handle.id);
+                let sw_req_id = swarm
+                    .behaviour_mut().req_resp
+                    .send_request(
+                        &job_info.owner,
+                        notice::Request::JobResult(job_result),
+                    );
+                println!("Notified the client: `{}` about the job. req-id: {}",
+                    job_info.owner, sw_req_id);
             },
         }
     }
