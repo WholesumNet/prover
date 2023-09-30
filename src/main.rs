@@ -1,121 +1,64 @@
 #![doc = include_str!("../README.md")]
 
-use futures::{future::Either, prelude::*, select};
-use libp2p::{
-    core::{muxing::StreamMuxerBox, transport::OrTransport, upgrade},
-    gossipsub, identity, mdns, noise, request_response,
-    swarm::NetworkBehaviour,
-    swarm::{StreamProtocol, SwarmBuilder, SwarmEvent},
-    tcp, yamux, PeerId, Transport,
+use futures::{
+    prelude::*, select, FutureExt,
+    stream::FuturesUnordered,
 };
-use libp2p_quic as quic;
-use std::collections::hash_map::DefaultHasher;
+use libp2p::{
+    gossipsub, mdns, request_response,
+    swarm::{SwarmEvent},
+    // PeerId,
+};
+use std::os::unix::process::ExitStatusExt;
 use std::collections::HashMap;
 use std::error::Error;
-use std::hash::{Hash, Hasher};
-use std::time::Duration;
+// use std::time::Duration;
 use clap::Parser;
 use uuid::Uuid;
-use comms::{notice, compute};
+use reqwest;
+
+use comms::{
+    p2p::{MyBehaviourEvent}, notice, compute
+};
 
 mod job;
+mod dstore;
 
 // CLI
 #[derive(Parser, Debug)]
 #[command(name = "Server CLI for Wholesum: p2p verifiable computing marketplace.")]
 #[command(author = "Wholesum team")]
-#[command(version = "1.0")]
+#[command(version = "0.1")]
 #[command(about = "Yet another verifiable compute marketplace.", long_about = None)]
 struct Cli {
-}
-
-// combine Gossipsub, mDNS, and RequestResponse
-#[derive(NetworkBehaviour)]
-struct MyBehaviour {
-    req_resp: request_response::cbor::Behaviour<notice::Request, notice::Response>,
-    gossipsub: gossipsub::Behaviour,
-    mdns: mdns::async_io::Behaviour,
+    #[arg(short, long)]
+    verify: bool,
 }
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     
     let cli = Cli::parse();
+    if cli.verify == true {
+        println!("Will also do verification.");
+    }
     
-    // running jobs(docker containers)
-    let mut docker_job_stream = job::DockerJob::new();
-    let mut running_jobs = HashMap::<String, job::JobInfo>::new();
-    // jobs awaiting verification
-    let mut to_be_verified_jobs = HashMap::<String, job::JobInfo>::new();
-    // jobs waiting to be collected
-    let mut to_be_collected_jobs = HashMap::<String, job::JobInfo>::new();
-    // zombie jobs
+    // running jobs(docker containers for compute and verify)
+    let mut compute_job_stream = job::DockerProcessStream::new();
+    let mut verification_job_stream = job::DockerProcessStream::new();
 
-    // get a random peer_id
-    let id_keys = identity::Keypair::generate_ed25519();
-    let local_peer_id = PeerId::from(id_keys.public());
-    println!("PeerId: {local_peer_id}");
-    // setup an encrypted dns-enabled transport over yamux
-    let tcp_transport = tcp::async_io::Transport::new(tcp::Config::default().nodelay(true))
-        .upgrade(upgrade::Version::V1Lazy)
-        .authenticate(noise::Config::new(&id_keys).expect("signing libp2p static keypair"))
-        .multiplex(yamux::Config::default())
-        .timeout(std::time::Duration::from_secs(30))
-        .boxed();
-    let quic_transport = quic::async_std::Transport::new(quic::Config::new(&id_keys));
-    let transport = OrTransport::new(quic_transport, tcp_transport)
-        .map(|either_output, _| match either_output {
-            Either::Left((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-            Either::Right((peer_id, muxer)) => (peer_id, StreamMuxerBox::new(muxer)),
-        })
-        .boxed();
+    let mut compute_jobs = HashMap::<String, job::Job>::new();
+    let mut verification_jobs = HashMap::<String, job::Job>::new();
 
-    // to content-address message, take the hash of message and use it as an id
-    let message_id_fn = |message: &gossipsub::Message| {
-        let mut s = DefaultHasher::new();
-        message.data.hash(&mut s);
-        gossipsub::MessageId::from(s.finish().to_string())
-    };
+    // because every closure is a unique type
+    let mut stdout_residue_upload_futures = FuturesUnordered::new();
+    let mut stderr_residue_upload_futures = FuturesUnordered::new();
+    let mut receipt_residue_upload_futures = FuturesUnordered::new();
 
-    // set a custom Gossipsub configuration
-    let gossipsub_config = gossipsub::ConfigBuilder::default()
-        .heartbeat_interval(Duration::from_secs(10)) // aid debugging by not cluttering log space
-        .validation_mode(gossipsub::ValidationMode::Strict) // enforce message signing
-        .message_id_fn(message_id_fn) // content-address messages
-        .build()
-        .expect("Invalid gossipsub config.");
-
-    // build a Gossipsub network behaviour
-    let mut gossipsub = gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(id_keys),
-        gossipsub_config,
-    )
-    .expect("Invalid behaviour configuration.");
-
-    // subscribe to our topic
-    const TOPIC_OF_INTEREST: &str = "<-- Compute Bazaar -->";
-    println!("topic of interest: `{TOPIC_OF_INTEREST}`");
-    // @ use topic_hash config for auto hash(topic)
-    let topic = gossipsub::IdentTopic::new(TOPIC_OF_INTEREST);
-    let _ = gossipsub.subscribe(&topic);
-
-    // create a swarm to manage events and peers
-    let mut swarm = {
-        let mdns = mdns::async_io::Behaviour::new(mdns::Config::default(), local_peer_id)?;
-        let req_resp = request_response::cbor::Behaviour::<notice::Request, notice::Response>::new(
-            [(
-                StreamProtocol::new("/p2pcompute"),
-                request_response::ProtocolSupport::Full,
-            )],
-            request_response::Config::default(),
-        );
-        let behaviour = MyBehaviour {
-            req_resp: req_resp,
-            gossipsub: gossipsub,
-            mdns: mdns,
-        };
-        SwarmBuilder::with_async_std_executor(transport, behaviour, local_peer_id).build()
-    };
+    // FairOSD-dfs http client
+    let dfs_client = reqwest::Client::new();
+    // Libp2p swarm 
+    let mut swarm = comms::p2p::setup_local_swarm();
 
     // read full lines from stdin
     // let mut input = io::BufReader::new(io::stdin()).lines().fuse();
@@ -124,8 +67,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-    
-    // kick it off
+    // oh shit here we go again
     loop {
         select! {
             // line = input.select_next_some() => {
@@ -148,6 +90,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         println!("mDNS discovered peer has expired: {peer_id}");
                         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                     }
+                },
+
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    println!("Local node is listening on {address}");
                 },
 
                 SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -178,79 +124,115 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 .behaviour_mut().req_resp
                                 .send_request(
                                     &peer_id,
-                                    notice::Request::Compute(offer),
+                                    notice::Request::ComputeOffer(offer),
                                 );
                             println!("compute offer was sent to client, id: {sw_req_id}");
                         },
 
-                        notice::Notice::Verify => {                            
+                        notice::Notice::Verify => {
+                            if false == cli.verify {
+                                continue;
+                            }
                             println!("`need verify` request from client: `{peer_id}`");
                             // engage with the client through a direct p2p channel
                             let sw_req_id = swarm
                                 .behaviour_mut().req_resp
                                 .send_request(
                                     &peer_id,
-                                    notice::Request::Verify,
+                                    notice::Request::VerifyOffer,
                                 );
                             println!("verification offer was sent, id: {sw_req_id}");
                         },
 
                         notice::Notice::JobStatus => {
-                            // job status inquiry 
+                            // job status inquiry
+                            // servers are lazy and clients need to query job status
+
                             // bytes [1-16] determine th job id 
                             let bytes_id = match message.data[1..=17].try_into() {
                                 Ok(b) => b,
                                 Err(e) => {
-                                    println!("Invalid job id, {e:?}");
+                                    println!("Invalid job id for `job-status` request, {e:?}");
                                     continue;
                                 },
                             };
                             let job_id = Uuid::from_bytes(bytes_id).to_string();
                             println!("`job-status` request from client: `{}`, job_id: `{}`",
                                 peer_id, job_id);
-                            let job_status;
-                            // this is a stronger check that the `running_jobs` key existance
-                            if docker_job_stream.is_job_running(&job_id) {
-                                job_status = compute::JobStatus::Running;
-                            } else {
-                                if to_be_verified_jobs.contains_key(&job_id) {
-                                    // awaits verification
-                                    job_status = compute::JobStatus::ToBeVerified;
-
-                                } else if to_be_collected_jobs.contains_key(&job_id) {
-                                    // awaits collection
-                                    job_status = compute::JobStatus::ToBeCollected;
-
-                                } else {
-                                    // unknown
-                                    job_status = compute::JobStatus::Unknown;
+                            // map internal status to network-wide status
+                            // check in compute jobs
+                            if let Some(compute_job) = compute_jobs.get(&job_id) {
+                                if peer_id != compute_job.owner {
+                                    continue;
                                 }
+                                let job_status = match compute_job.status {
+                                    job::Status::ExecutionFailed => {
+                                        compute::JobStatus::ExecutionFailed(
+                                            compute_job.residue.stdout_cid.clone(),
+                                            compute_job.residue.stderr_cid.clone(),
+                                        )
+                                    },
+                                    job::Status::ReadyForVerification => {
+                                        compute::JobStatus::ReadyForVerification(
+                                            compute_job.residue.receipt_cid.clone()
+                                        )
+                                    },
+                                    //@ payment must be made before harvest
+                                    job::Status::ReadyToHarvest => {
+                                        compute::JobStatus::ReadyToHarvest
+                                    },
+                                    // all the rest are trivial status
+                                    _ => compute::JobStatus::Running,
+                                };
+                                let sw_req_id = swarm
+                                    .behaviour_mut().req_resp
+                                    .send_request(
+                                        &peer_id,
+                                        notice::Request::UpdateForJob(compute::JobUpdate{
+                                            id: job_id.clone(),
+                                            status: job_status,
+                                        }),
+                                    );
+                                println!("compute job status was sent to the client. req_id: `{sw_req_id}`");
                             }
-                            let sw_req_id = swarm
-                                .behaviour_mut().req_resp
-                                .send_request(
-                                    &peer_id,
-                                    notice::Request::Verify,
-                                );
-                            println!("Job result was sent to the client. req_id: `{sw_req_id}`");
+                            // check in verification jobs
+                            if let Some(verification_job) = verification_jobs.get(&job_id) {
+                                // if false == cli.verify {
+                                //     continue;
+                                // }
+                                // relax and let non-owners to query a verification job as well
+                                // if peer_id != verification_job.owner {
+                                //     continue;
+                                // }
+                                let job_status = match verification_job.status {
+                                    job::Status::VerificationSucceeded => {
+                                        compute::JobStatus::VerificationSucceeded
+                                    },                                    
+                                    job::Status::VerificationFailed => {
+                                        compute::JobStatus::VerificationFailed(
+                                            verification_job.residue.stderr_cid.clone(),
+                                        )
+                                    },
+                                    // anything else is not-important for verification queries
+                                    _ => compute::JobStatus::Running,
+                                };
+                                let sw_req_id = swarm
+                                    .behaviour_mut().req_resp
+                                    .send_request(
+                                        &peer_id,
+                                        notice::Request::UpdateForJob(compute::JobUpdate{
+                                            id: job_id.clone(),
+                                            status: job_status,
+                                        }),
+                                    );
+                                println!("Verification job status was sent to the client. req_id: `{sw_req_id}`");
+                            }
+
+                            
                         }
                     };
                 },
-
-                // incoming compute/verify request(interest actually)
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
-                    peer: sender_peer_id,
-                    message: request_response::Message::Request {
-                        //request,
-                        channel,
-                        request_id,
-                        ..
-                    }
-                })) => {                
-                    println!("request from: `{}`, req_id: {:#?}, chan: {:#?}",
-                        sender_peer_id, request_id, channel);                    
-                },
-
+                
                 // incoming response to an earlier compute/verify offer
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
                     peer: peer_id,
@@ -260,133 +242,273 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 })) => {                    
                     match response {
-                        notice::Response::DeclineOffer => {
+                        notice::Response::DeclinedOffer => {
                             println!("Offer decliend by the client: `{peer_id}`");
                         },                        
 
-                        notice::Response::Compute(compute_job) => {
-                            let mut spawn_error = |e: String| {
-                                println!("{e}");
-                                // notify client
-                                let sw_req_id = swarm
-                                    .behaviour_mut().req_resp
-                                    .send_request(
-                                        &peer_id,
-                                        notice::Request::JobResult(
-                                            compute::JobResult {
-                                                id: compute_job.id.clone(),
-                                                status: compute::JobStatus::FinishedWithError(e),
-                                            }
-                                        ),
-                                    );
-                                println!("Client has been notified about this failure. req_id: {sw_req_id}");
-                            };
-
-                            println!("recived `compute job` request from client: {}, job: {:#?}",
-                                peer_id, compute_job);                           
-                            // no duplicate jobs are allowed
-                            if running_jobs.contains_key(&compute_job.id) {
-                                spawn_error("Duplicate job id.".to_string());
+                        notice::Response::ComputeJob(compute_details) => {
+                            println!("received `compute job` request from client: `{}`, job: `{:#?}`",
+                                peer_id, compute_details);                           
+                            // no duplicate job_ids are allowed
+                            if compute_jobs.contains_key(&compute_details.job_id) {
+                                println!("Duplicate job, ignored.");
                                 continue;
                             }
                             // schedule the job to run                            
-                            if let Err(e) = docker_job_stream.add_job(
-                                compute_job.id.clone(),
-                                compute_job.details.docker_image.clone(),
-                                compute_job.details.command.clone()) {
+                            if let Err(e) = compute_job_stream.add(
+                                compute_details.job_id.clone(),
+                                compute_details.docker_image.clone(),
+                                compute_details.command.clone()
+                            ) {
 
-                                spawn_error(format!("Job spawn error: `{e:?}`"));
+                                println!("Job spawn error: `{:?}`", e);
                                 continue;
                             }
                             // keep track of running jobs
-                            running_jobs.insert(
-                                compute_job.id,
-                                job::JobInfo { 
+                            compute_jobs.insert(
+                                compute_details.job_id.clone(),
+                                job::Job {
+                                    id: compute_details.job_id,
                                     owner: peer_id,
-                                    job_details: compute_job.details,
-                                }
+                                    status: job::Status::DockerWarmingUp,
+                                    residue: job::Residue {
+                                        stdout_cid: None,
+                                        stderr_cid: None,
+                                        receipt_cid: None,
+                                    },
+                                },
                             );
                         },
 
-                        notice::Response::Verify => (),
+                        notice::Response::VerificationJob(verification_details) => {
+                            if false == cli.verify {
+                                continue;
+                            }
+                            println!("received `verification job` request from client: `{}`, job: `{:#?}`",
+                                peer_id, verification_details);                           
+                            // no duplicate job_ids are allowed
+                            if verification_jobs.contains_key(&verification_details.job_id) {
+                                println!("Duplicate job, ignored.");
+                                continue;
+                            }
+                            // schedule the job to run 
+                            let cmd = format!(
+                                "sh -c /root/verifier/target/verifier --image-id {} --receipt-file {}",
+                                verification_details.image_id,
+                                verification_details.receipt_cid,
+                            );
+                            if let Err(e) = verification_job_stream.add(
+                                verification_details.job_id.clone(),
+                                "test-risc0".to_string(),
+                                cmd,
+                            ) {
+
+                                println!("Job spawn error: `{e:?}`");
+                                continue;
+                            }
+                            // keep track of running jobs
+                            verification_jobs.insert(
+                                verification_details.job_id.clone(),
+                                job::Job {
+                                    id: verification_details.job_id,
+                                    owner: peer_id,
+                                    status: job::Status::DockerWarmingUp,
+                                    residue: job::Residue {
+                                        stdout_cid: None,
+                                        stderr_cid: None,
+                                        receipt_cid: None,
+                                    },
+                                },
+                            );
+                        }
                     }
-
-                },
-
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Local node is listening on {address}");
                 },
 
                 _ => {}
 
             },
-            // docker job is finished, get in touch with the client
-            mut job_handle = docker_job_stream.select_next_some() => {
-                println!("Docker job `{}` has been finished.", job_handle.id);
+
+            // docker verification job is finished
+            mut process_handle = verification_job_stream.select_next_some() => {
+                println!("Docker process for verification job `{}` has been finished.",
+                    process_handle.job_id);
                 //@ collect any relevant objects before terminating process
-                let exit_code = match job_handle.child.status().await {
+                let exit_code = match process_handle.child.status().await {
                     Ok(status) => status.code().unwrap_or_else(
-                        || {
-                            println!("Docker process terminated by signal.");
-                            101 // @ retrieve signal
-                        }
+                        || status.signal().unwrap_or_else(
+                            || {
+                                println!("Docker process was terminated by a signal but \
+                                    the signal is not available.");
+                                99
+                            })
                     ),
                     Err(e) => {
-                        println!("Failed to collect docker process's exit status: {e:?}");
-                        102
+                        println!("Failed to retrieve docker process's exit status: {e:?}");
+                        99
                     }
-                };
-
-                //@ stdout/stderr can be quite large so how about moving them into streams? 
-                // collect stdout and stderr
-                let mut stdout_buffer = String::new();
-                if let Some(mut stdout) = job_handle.child.stdout {
-                    //@ can even ignore errors :)
-                    if let Err(e) = stdout.read_to_string(&mut stdout_buffer).await {
-                        stdout_buffer = format!("Failed to capture stdout: {e:?}");
-                        // println!("stdout: `{stdout_buffer}`");
-                    }
-                }
-                let mut stderr_buffer = String::new();
-                if let Some(mut stderr) = job_handle.child.stderr {
-                    if let Err(e) = stderr.read_to_string(&mut stderr_buffer).await {
-                        stderr_buffer = format!("Failed to capture stderr: {e:?}");
-                        // println!("stderr: `{stderr_buffer}`");
-                    }
-                }
-                println!("docker container execution is terminated. \
-                    exit_code: `{}`\n, stderr: `{}`\n, stdout: `{}`",
-                    exit_code, stderr_buffer, stdout_buffer); 
-                // job is ready to be verified now
-                // notify client that the job has been executed
-                if false == running_jobs.contains_key(&job_handle.id) {
-                    println!("Critical error: container's job info is missing.");
-                    //@ what to do with zombie jobs?
+                };                
+                // notify the client that the job has been finished and ready to be verified
+                if false == verification_jobs.contains_key(&process_handle.job_id) {
+                    println!("Critical error: job is missing.");
+                    //@ what to do here?
                     continue;
                 }
-                let job_info = running_jobs.remove(&job_handle.id).unwrap();
-
-                let job_result;
-                if exit_code == 0 {
-                    job_result = compute::JobResult {
-                        id: job_handle.id,
-                        status: compute::JobStatus::ToBeVerified,
-                    };
+                let job = verification_jobs.get_mut(&process_handle.job_id).unwrap();
+                job.status = if exit_code == 0 { 
+                    job::Status::VerificationSucceeded
                 } else {
-                    job_result = compute::JobResult {
-                        id: job_handle.id,
-                        status: compute::JobStatus::FinishedWithError("".to_string()), //@ report stderr, ...
-                    };                    
+                    job::Status::VerificationFailed 
+                };                
+
+            },
+
+            // docker compute job is finished
+            mut process_handle = compute_job_stream.select_next_some() => {
+                println!("Docker process for compute job `{}` has been finished.",
+                    process_handle.job_id);
+                //@ collect any relevant objects before terminating process
+                let exit_code = match process_handle.child.status().await {
+                    Ok(status) => status.code().unwrap_or_else(
+                        || status.signal().unwrap_or_else(
+                            || {
+                                println!("Docker process was terminated by a signal but \
+                                    the signal is not available.");
+                                99
+                            })
+                    ),
+                    Err(e) => {
+                        println!("Failed to retrieve docker process's exit status: {e:?}");
+                        99
+                    }
+                };                
+                // notify the client that the job has been finished and ready to be verified
+                if false == compute_jobs.contains_key(&process_handle.job_id) {
+                    println!("Critical error: job is missing.");
+                    //@ what to do here?
+                    continue;
                 }
-                // running_jobs.retain(|&k, _| k != job_handle.id);
-                let sw_req_id = swarm
-                    .behaviour_mut().req_resp
-                    .send_request(
-                        &job_info.owner,
-                        notice::Request::JobResult(job_result),
-                    );
-                println!("Notified the client: `{}` about the job. req-id: {}",
-                    job_info.owner, sw_req_id);
+                let job = compute_jobs.get_mut(&process_handle.job_id).unwrap();
+
+                if exit_code != 0 {
+                    job.status = job::Status::ExecutionFailed;
+                }
+                // store stdout, stderr, ... in dfs and get cid
+                //@ should get /var/lib.... path from a config file
+                let docker_vol_path = format!("/var/lib/docker/volumes/{}/_data",
+                    process_handle.job_id);
+                // persist stdout
+                let job_id_for_stdout = process_handle.job_id.clone();                  
+                let stdout_fut = dfs_client.get(
+                    format!("{docker_vol_path}/residue/stdout")
+                    )
+                    .send()
+                    .then(|resp| async move {
+                        let cid = match resp {
+                            Ok(_resp) => {
+                                // extract cid
+                                "cid was generated".to_string()                                    
+                            },
+                            Err(e) => {
+                                println!("job_id: `{}`, residue: `stdout`, upload error: {:?}",
+                                    job_id_for_stdout, e);
+                                //@ this is a criticial error
+                                "".to_string()
+                            },
+                        };
+                        
+                        dstore::UploadResult {
+                            job_id: job_id_for_stdout,
+                            cid: cid,
+                        }
+                    });
+                stdout_residue_upload_futures.push(stdout_fut);
+                // persist stderr
+                let job_id_for_stderr = process_handle.job_id.clone();
+                let stderr_fut = dfs_client.get(
+                    format!("{docker_vol_path}/residue/stderr")
+                    )
+                    .send()
+                    .then(|resp| async move {
+                        let cid = match resp {
+                            Ok(_resp) => {
+                                // extract cid
+                                "cid was generated".to_string()                                    
+                            },
+                            Err(e) => {
+                                println!("job_id: `{}`, residue: `stderr`, upload error: {:?}",
+                                    job_id_for_stderr, e);
+                                //@ this is a criticial error
+                                "".to_string()
+                            },
+                        };
+                        
+                        dstore::UploadResult {
+                            job_id: job_id_for_stderr,
+                            cid: cid,
+                        }
+                    });
+                stderr_residue_upload_futures.push(stderr_fut);                    
+                // persist receipt
+                let job_id_for_receipt = process_handle.job_id.clone();
+                let receipt_fut = dfs_client.get(
+                    format!("{docker_vol_path}/residue/receipt")
+                    )
+                    .send()
+                    .then(|resp| async move {
+                        let cid = match resp {
+                            Ok(_resp) => {
+                                // extract cid
+                                "cid was generated".to_string()                                    
+                            },
+                            Err(e) => {
+                                println!("job_id: `{}`, residue: `receipt`, upload error: {:?}",
+                                    job_id_for_receipt, e);
+                                //@ this is a criticial error
+                                "".to_string()
+                            },
+                        };
+                        
+                        dstore::UploadResult {
+                            job_id: job_id_for_receipt,
+                            cid: cid,
+                        }
+                    });
+                receipt_residue_upload_futures.push(receipt_fut);
+            },
+            
+            // handle stdout objects that have been uploaded to dfs
+            stdout_upload_result = stdout_residue_upload_futures.select_next_some() => {
+                if false == compute_jobs.contains_key(&stdout_upload_result.job_id) {
+                    println!("Critical error: job is missing.");
+                    //@ what to do here?
+                    continue;
+                }
+                let job = compute_jobs.get_mut(&stdout_upload_result.job_id).unwrap();
+                job.residue.stdout_cid = Some(stdout_upload_result.cid);
+            },
+            
+            // handle stdout objects that have been uploaded to dfs
+            stderr_upload_result = stderr_residue_upload_futures.select_next_some() => { 
+                if false == compute_jobs.contains_key(&stderr_upload_result.job_id) {
+                    println!("Critical error: job is missing.");
+                    //@ what to do here?
+                    continue;
+                }
+                let job = compute_jobs.get_mut(&stderr_upload_result.job_id).unwrap();
+                job.residue.stderr_cid = Some(stderr_upload_result.cid);              
+            },
+
+            // handle receipt objects that have been uploaded to dfs
+            receipt_upload_result = receipt_residue_upload_futures.select_next_some() => {
+                // notify the client that the job has been finished and ready to be verified
+                if false == compute_jobs.contains_key(&receipt_upload_result.job_id) {
+                    println!("Critical error: job is missing.");
+                    //@ what to do here?
+                    continue;
+                }
+                let job = compute_jobs.get_mut(&receipt_upload_result.job_id).unwrap();
+                job.status = job::Status::ReadyForVerification;
+                job.residue.receipt_cid = Some(receipt_upload_result.cid.clone()); 
             },
         }
     }
