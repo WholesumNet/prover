@@ -7,7 +7,7 @@ use futures::{
 use libp2p::{
     gossipsub, mdns, request_response,
     swarm::{SwarmEvent},
-    // PeerId,
+    PeerId,
 };
 use std::os::unix::process::ExitStatusExt;
 use std::collections::HashMap;
@@ -129,106 +129,114 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             println!("compute offer was sent to client, id: {sw_req_id}");
                         },
 
-                        notice::Notice::Verify => {
+                        notice::Notice::Verification => {
                             if false == cli.verify {
                                 continue;
                             }
-                            println!("`need verify` request from client: `{peer_id}`");
+                            println!("`need verification` request from client: `{peer_id}`");
                             // engage with the client through a direct p2p channel
                             let sw_req_id = swarm
                                 .behaviour_mut().req_resp
                                 .send_request(
                                     &peer_id,
-                                    notice::Request::VerifyOffer,
+                                    notice::Request::VerificationOffer,
                                 );
                             println!("verification offer was sent, id: {sw_req_id}");
                         },
 
                         notice::Notice::JobStatus => {
                             // job status inquiry
-                            // servers are lazy and clients need to query job status
+                            // servers are lazy and clients need to query for their job's status
 
                             // bytes [1-16] determine th job id 
-                            let bytes_id = match message.data[1..=17].try_into() {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    println!("Invalid job id for `job-status` request, {e:?}");
-                                    continue;
-                                },
-                            };
-                            let job_id = Uuid::from_bytes(bytes_id).to_string();
-                            println!("`job-status` request from client: `{}`, job_id: `{}`",
-                                peer_id, job_id);
+                            // let bytes_id = match message.data[1..=17].try_into() {
+                            //     Ok(b) => b,
+                            //     Err(e) => {
+                            //         println!("Invalid job id for `job-status` request, {e:?}");
+                            //         continue;
+                            //     },
+                            // };
+                            // let job_id = Uuid::from_bytes(bytes_id).to_string();
+                            println!("`job-status` request from client: `{}`",
+                                peer_id);
+                            let updates = job_status_of_peer(
+                                &compute_jobs, &verification_jobs, peer_id);
+                            let sw_req_id = swarm
+                                .behaviour_mut().req_resp
+                                .send_request(
+                                    &peer_id,
+                                    notice::Request::UpdateForJobs(updates),
+                                );
+                            println!("jobs' status was sent to the client. req_id: `{sw_req_id}`");
+
                             // map internal status to network-wide status
                             // check in compute jobs
-                            if let Some(compute_job) = compute_jobs.get(&job_id) {
-                                if peer_id != compute_job.owner {
-                                    continue;
-                                }
-                                let job_status = match compute_job.status {
-                                    job::Status::ExecutionFailed => {
-                                        compute::JobStatus::ExecutionFailed(
-                                            compute_job.residue.stdout_cid.clone(),
-                                            compute_job.residue.stderr_cid.clone(),
-                                        )
-                                    },
-                                    job::Status::ReadyForVerification => {
-                                        compute::JobStatus::ReadyForVerification(
-                                            compute_job.residue.receipt_cid.clone()
-                                        )
-                                    },
-                                    //@ payment must be made before harvest
-                                    job::Status::ReadyToHarvest => {
-                                        compute::JobStatus::ReadyToHarvest
-                                    },
-                                    // all the rest are trivial status
-                                    _ => compute::JobStatus::Running,
-                                };
-                                let sw_req_id = swarm
-                                    .behaviour_mut().req_resp
-                                    .send_request(
-                                        &peer_id,
-                                        notice::Request::UpdateForJob(compute::JobUpdate{
-                                            id: job_id.clone(),
-                                            status: job_status,
-                                        }),
-                                    );
-                                println!("compute job status was sent to the client. req_id: `{sw_req_id}`");
-                            }
-                            // check in verification jobs
-                            if let Some(verification_job) = verification_jobs.get(&job_id) {
-                                // if false == cli.verify {
-                                //     continue;
-                                // }
-                                // relax and let non-owners to query a verification job as well
-                                // if peer_id != verification_job.owner {
-                                //     continue;
-                                // }
-                                let job_status = match verification_job.status {
-                                    job::Status::VerificationSucceeded => {
-                                        compute::JobStatus::VerificationSucceeded
-                                    },                                    
-                                    job::Status::VerificationFailed => {
-                                        compute::JobStatus::VerificationFailed(
-                                            verification_job.residue.stderr_cid.clone(),
-                                        )
-                                    },
-                                    // anything else is not-important for verification queries
-                                    _ => compute::JobStatus::Running,
-                                };
-                                let sw_req_id = swarm
-                                    .behaviour_mut().req_resp
-                                    .send_request(
-                                        &peer_id,
-                                        notice::Request::UpdateForJob(compute::JobUpdate{
-                                            id: job_id.clone(),
-                                            status: job_status,
-                                        }),
-                                    );
-                                println!("Verification job status was sent to the client. req_id: `{sw_req_id}`");
-                            }
-
-                            
+                            // if let Some(compute_job) = compute_jobs.get(&job_id) {
+                            //     if peer_id != compute_job.owner {
+                            //         continue;
+                            //     }
+                            //     let job_status = match compute_job.status {
+                            //         job::Status::ExecutionFailed => {
+                            //             compute::JobStatus::ExecutionFailed(
+                            //                 compute_job.residue.stdout_cid.clone(),
+                            //                 compute_job.residue.stderr_cid.clone(),
+                            //             )
+                            //         },
+                            //         job::Status::ReadyForVerification => {
+                            //             compute::JobStatus::ReadyForVerification(
+                            //                 compute_job.residue.receipt_cid.clone()
+                            //             )
+                            //         },
+                            //         //@ payment must be made before harvest
+                            //         job::Status::ReadyToHarvest => {
+                            //             compute::JobStatus::ReadyToHarvest
+                            //         },
+                            //         // all the rest are trivial status
+                            //         _ => compute::JobStatus::Running,
+                            //     };
+                            //     let sw_req_id = swarm
+                            //         .behaviour_mut().req_resp
+                            //         .send_request(
+                            //             &peer_id,
+                            //             notice::Request::UpdateForJob(compute::JobUpdate{
+                            //                 id: job_id.clone(),
+                            //                 status: job_status,
+                            //             }),
+                            //         );
+                            //     println!("compute job status was sent to the client. req_id: `{sw_req_id}`");
+                            // }
+                            // // check in verification jobs
+                            // if let Some(verification_job) = verification_jobs.get(&job_id) {
+                            //     // if false == cli.verify {
+                            //     //     continue;
+                            //     // }
+                            //     // relax and let non-owners to query a verification job's status as well
+                            //     // if peer_id != verification_job.owner {
+                            //     //     continue;
+                            //     // }
+                            //     let job_status = match verification_job.status {
+                            //         job::Status::VerificationSucceeded => {
+                            //             compute::JobStatus::VerificationSucceeded
+                            //         },                                    
+                            //         job::Status::VerificationFailed => {
+                            //             compute::JobStatus::VerificationFailed(
+                            //                 verification_job.residue.stderr_cid.clone(),
+                            //             )
+                            //         },
+                            //         // anything else is not-important for verification queries
+                            //         _ => compute::JobStatus::Running,
+                            //     };
+                            //     let sw_req_id = swarm
+                            //         .behaviour_mut().req_resp
+                            //         .send_request(
+                            //             &peer_id,
+                            //             notice::Request::UpdateForJob(compute::JobUpdate{
+                            //                 id: job_id.clone(),
+                            //                 status: job_status,
+                            //             }),
+                            //         );
+                            //     println!("Verification job status was sent to the client. req_id: `{sw_req_id}`");
+                            // }                            
                         }
                     };
                 },
@@ -512,4 +520,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
             },
         }
     }
+}
+
+fn job_status_of_peer(
+    compute_jobs: &HashMap::<String, job::Job>,
+    verification_jobs: &HashMap::<String, job::Job>,
+    peer_id: PeerId
+) -> Vec<compute::JobUpdate> {
+    // retrieve all status of jobs owned by the peer_id
+    let mut updates = Vec::<compute::JobUpdate>::new();
+    let iter = compute_jobs.values().filter(|&j| j.owner == peer_id)
+        .chain(verification_jobs.values().filter(|&j| j.owner == peer_id));
+    for job in iter {
+        let status = match job.status {
+            job::Status::ExecutionFailed => {
+                compute::JobStatus::ExecutionFailed(
+                    job.residue.stdout_cid.clone(),
+                    job.residue.stderr_cid.clone(),
+                )
+            },
+            job::Status::ReadyForVerification => {
+                compute::JobStatus::ReadyForVerification(
+                    job.residue.receipt_cid.clone()
+                )
+            },
+            //@ payment must be made before harvest
+            job::Status::ReadyToHarvest => {
+                compute::JobStatus::ReadyToHarvest
+            },
+            // all the rest are trivial status
+            _ => compute::JobStatus::Running,
+        };
+        updates.push(compute::JobUpdate {
+            id: job.id.clone(),
+            status: status,
+        });
+    }
+    updates
 }
