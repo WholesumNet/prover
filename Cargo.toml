@@ -18,4 +18,5 @@ num_enum = "0.6.1"
 clap = { version = "4.3.21", features = ["derive"] }
 uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
 reqwest = "0.11"
-comms = {path = "../comms"}
+comms = { path = "../comms" }
+dstorage = { path = "../dstorage" }

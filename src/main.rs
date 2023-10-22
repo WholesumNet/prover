@@ -1,28 +1,33 @@
 #![doc = include_str!("../README.md")]
 
 use futures::{
-    prelude::*, select, FutureExt,
+    prelude::*, select, FutureExt, join,
     stream::FuturesUnordered,
 };
+use std::os::unix::process::ExitStatusExt;
+use std::collections::HashMap;
+use std::error::Error;
+use std::time::Duration;
+
+use clap::Parser;
+use reqwest;
 use libp2p::{
     gossipsub, mdns, request_response,
     swarm::{SwarmEvent},
     PeerId,
 };
-use std::os::unix::process::ExitStatusExt;
-use std::collections::HashMap;
-use std::error::Error;
-// use std::time::Duration;
-use clap::Parser;
-use uuid::Uuid;
-use reqwest;
-
 use comms::{
     p2p::{MyBehaviourEvent}, notice, compute
 };
+use dstorage::dfs;
 
 mod job;
-mod dstore;
+
+#[derive(Debug)]
+struct PodShareResult {
+    job_id: String,
+    cid: String,
+}
 
 // CLI
 #[derive(Parser, Debug)]
@@ -43,6 +48,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("Will also do verification.");
     }
     
+    // FairOS-dfs http client
+    let dfs_endpoint = String::from("http://localhost:9090");
+    let dfs_username = String::from("whole2");
+    let dfs_password = String::from("wholewhole00");
+    let dfs_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
+        .build()
+        .expect("FairOS-dfs server should be available and running to continue.");
+    let dfs_cookie = dfs::login(
+        &dfs_client, &dfs_endpoint,
+        &dfs_username, &dfs_password
+    ).await
+    .expect("Should first log into FairOS-dfs to continue.");
+    assert_ne!(
+        dfs_cookie, String::from(""),
+        "Cookie from FairOS-dfs cannot be empty."
+    );
+    
     // running jobs(docker containers for compute and verify)
     let mut compute_job_stream = job::DockerProcessStream::new();
     let mut verification_job_stream = job::DockerProcessStream::new();
@@ -50,13 +73,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut compute_jobs = HashMap::<String, job::Job>::new();
     let mut verification_jobs = HashMap::<String, job::Job>::new();
 
-    // because every closure is a unique type
-    let mut stdout_residue_upload_futures = FuturesUnordered::new();
-    let mut stderr_residue_upload_futures = FuturesUnordered::new();
-    let mut receipt_residue_upload_futures = FuturesUnordered::new();
-
-    // FairOSD-dfs http client
-    let dfs_client = reqwest::Client::new();
+    let mut fd12_upload_futures = FuturesUnordered::new();
+    let mut receipt_upload_futures = FuturesUnordered::new();
+        
     // Libp2p swarm 
     let mut swarm = comms::p2p::setup_local_swarm();
 
@@ -146,7 +165,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                         notice::Notice::JobStatus => {
                             // job status inquiry
-                            // servers are lazy and clients need to query for their job's status
+                            // servers are lazy with job updates so clients need to query for their job's status every so often
 
                             // bytes [1-16] determine th job id 
                             // let bytes_id = match message.data[1..=17].try_into() {
@@ -167,76 +186,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     &peer_id,
                                     notice::Request::UpdateForJobs(updates),
                                 );
-                            println!("jobs' status was sent to the client. req_id: `{sw_req_id}`");
-
-                            // map internal status to network-wide status
-                            // check in compute jobs
-                            // if let Some(compute_job) = compute_jobs.get(&job_id) {
-                            //     if peer_id != compute_job.owner {
-                            //         continue;
-                            //     }
-                            //     let job_status = match compute_job.status {
-                            //         job::Status::ExecutionFailed => {
-                            //             compute::JobStatus::ExecutionFailed(
-                            //                 compute_job.residue.stdout_cid.clone(),
-                            //                 compute_job.residue.stderr_cid.clone(),
-                            //             )
-                            //         },
-                            //         job::Status::ReadyForVerification => {
-                            //             compute::JobStatus::ReadyForVerification(
-                            //                 compute_job.residue.receipt_cid.clone()
-                            //             )
-                            //         },
-                            //         //@ payment must be made before harvest
-                            //         job::Status::ReadyToHarvest => {
-                            //             compute::JobStatus::ReadyToHarvest
-                            //         },
-                            //         // all the rest are trivial status
-                            //         _ => compute::JobStatus::Running,
-                            //     };
-                            //     let sw_req_id = swarm
-                            //         .behaviour_mut().req_resp
-                            //         .send_request(
-                            //             &peer_id,
-                            //             notice::Request::UpdateForJob(compute::JobUpdate{
-                            //                 id: job_id.clone(),
-                            //                 status: job_status,
-                            //             }),
-                            //         );
-                            //     println!("compute job status was sent to the client. req_id: `{sw_req_id}`");
-                            // }
-                            // // check in verification jobs
-                            // if let Some(verification_job) = verification_jobs.get(&job_id) {
-                            //     // if false == cli.verify {
-                            //     //     continue;
-                            //     // }
-                            //     // relax and let non-owners to query a verification job's status as well
-                            //     // if peer_id != verification_job.owner {
-                            //     //     continue;
-                            //     // }
-                            //     let job_status = match verification_job.status {
-                            //         job::Status::VerificationSucceeded => {
-                            //             compute::JobStatus::VerificationSucceeded
-                            //         },                                    
-                            //         job::Status::VerificationFailed => {
-                            //             compute::JobStatus::VerificationFailed(
-                            //                 verification_job.residue.stderr_cid.clone(),
-                            //             )
-                            //         },
-                            //         // anything else is not-important for verification queries
-                            //         _ => compute::JobStatus::Running,
-                            //     };
-                            //     let sw_req_id = swarm
-                            //         .behaviour_mut().req_resp
-                            //         .send_request(
-                            //             &peer_id,
-                            //             notice::Request::UpdateForJob(compute::JobUpdate{
-                            //                 id: job_id.clone(),
-                            //                 status: job_status,
-                            //             }),
-                            //         );
-                            //     println!("Verification job status was sent to the client. req_id: `{sw_req_id}`");
-                            // }                            
+                            println!("jobs' status was sent to the client. req_id: `{sw_req_id}`");                            
                         }
                     };
                 },
@@ -280,8 +230,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     owner: peer_id,
                                     status: job::Status::DockerWarmingUp,
                                     residue: job::Residue {
-                                        stdout_cid: None,
-                                        stderr_cid: None,
+                                        pod_cid: None,
                                         receipt_cid: None,
                                     },
                                 },
@@ -322,8 +271,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     owner: peer_id,
                                     status: job::Status::DockerWarmingUp,
                                     residue: job::Residue {
-                                        stdout_cid: None,
-                                        stderr_cid: None,
+                                        pod_cid: None,
                                         receipt_cid: None,
                                     },
                                 },
@@ -336,7 +284,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             },
 
-            // docker verification job is finished
+            // verification job is finished
             mut process_handle = verification_job_stream.select_next_some() => {
                 println!("Docker process for verification job `{}` has been finished.",
                     process_handle.job_id);
@@ -355,7 +303,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         99
                     }
                 };                
-                // notify the client that the job has been finished and ready to be verified
+                // job has been finished and ready to be finalized
                 if false == verification_jobs.contains_key(&process_handle.job_id) {
                     println!("Critical error: job is missing.");
                     //@ what to do here?
@@ -366,11 +314,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     job::Status::VerificationSucceeded
                 } else {
                     job::Status::VerificationFailed 
-                };                
-
+                };
             },
 
-            // docker compute job is finished
+            // compute job is finished
             mut process_handle = compute_job_stream.select_next_some() => {
                 println!("Docker process for compute job `{}` has been finished.",
                     process_handle.job_id);
@@ -389,7 +336,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         99
                     }
                 };                
-                // notify the client that the job has been finished and ready to be verified
+                // job has been finished and ready to be verified
                 if false == compute_jobs.contains_key(&process_handle.job_id) {
                     println!("Critical error: job is missing.");
                     //@ what to do here?
@@ -397,126 +344,64 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 let job = compute_jobs.get_mut(&process_handle.job_id).unwrap();
 
-                if exit_code != 0 {
-                    job.status = job::Status::ExecutionFailed;
-                }
-                // store stdout, stderr, ... in dfs and get cid
+                job.status = if exit_code != 0 { 
+                    job::Status::ExecutionFailed                    
+                } else {
+                    // we can track residue upload failures with the help of this status
+                    job::Status::ExecutionFinished
+                };                
+                // each job has at least two pods to store its residue:
+                // - "stderr" and "stdout" are stored in the "/residue" path of the private pod
+                // - "receipt" is stored in the "/" path of the public pod
+                // once the payment is processed, the private pod gets shared with the client
+                
                 //@ should get /var/lib.... path from a config file
                 let docker_vol_path = format!("/var/lib/docker/volumes/{}/_data",
-                    process_handle.job_id);
-                // persist stdout
-                let job_id_for_stdout = process_handle.job_id.clone();                  
-                let stdout_fut = dfs_client.get(
-                    format!("{docker_vol_path}/residue/stdout")
+                    process_handle.job_id);                
+                // persist and share receipt                              
+                receipt_upload_futures.push(
+                    persist_receipt(
+                        &dfs_client, &dfs_endpoint, &dfs_cookie,
+                        &dfs_password, 
+                        format!("receipt_{}", process_handle.job_id),
+                        String::from("/"), 
+                        format!("{}/receipt", docker_vol_path),
+                        process_handle.job_id.clone(),
                     )
-                    .send()
-                    .then(|resp| async move {
-                        let cid = match resp {
-                            Ok(_resp) => {
-                                // extract cid
-                                "cid was generated".to_string()                                    
-                            },
-                            Err(e) => {
-                                println!("job_id: `{}`, residue: `stdout`, upload error: {:?}",
-                                    job_id_for_stdout, e);
-                                //@ this is a criticial error
-                                "".to_string()
-                            },
-                        };
-                        
-                        dstore::UploadResult {
-                            job_id: job_id_for_stdout,
-                            cid: cid,
-                        }
-                    });
-                stdout_residue_upload_futures.push(stdout_fut);
-                // persist stderr
-                let job_id_for_stderr = process_handle.job_id.clone();
-                let stderr_fut = dfs_client.get(
-                    format!("{docker_vol_path}/residue/stderr")
-                    )
-                    .send()
-                    .then(|resp| async move {
-                        let cid = match resp {
-                            Ok(_resp) => {
-                                // extract cid
-                                "cid was generated".to_string()                                    
-                            },
-                            Err(e) => {
-                                println!("job_id: `{}`, residue: `stderr`, upload error: {:?}",
-                                    job_id_for_stderr, e);
-                                //@ this is a criticial error
-                                "".to_string()
-                            },
-                        };
-                        
-                        dstore::UploadResult {
-                            job_id: job_id_for_stderr,
-                            cid: cid,
-                        }
-                    });
-                stderr_residue_upload_futures.push(stderr_fut);                    
-                // persist receipt
-                let job_id_for_receipt = process_handle.job_id.clone();
-                let receipt_fut = dfs_client.get(
-                    format!("{docker_vol_path}/residue/receipt")
-                    )
-                    .send()
-                    .then(|resp| async move {
-                        let cid = match resp {
-                            Ok(_resp) => {
-                                // extract cid
-                                "cid was generated".to_string()                                    
-                            },
-                            Err(e) => {
-                                println!("job_id: `{}`, residue: `receipt`, upload error: {:?}",
-                                    job_id_for_receipt, e);
-                                //@ this is a criticial error
-                                "".to_string()
-                            },
-                        };
-                        
-                        dstore::UploadResult {
-                            job_id: job_id_for_receipt,
-                            cid: cid,
-                        }
-                    });
-                receipt_residue_upload_futures.push(receipt_fut);
+                );
             },
             
-            // handle stdout objects that have been uploaded to dfs
-            stdout_upload_result = stdout_residue_upload_futures.select_next_some() => {
-                if false == compute_jobs.contains_key(&stdout_upload_result.job_id) {
-                    println!("Critical error: job is missing.");
-                    //@ what to do here?
-                    continue;
-                }
-                let job = compute_jobs.get_mut(&stdout_upload_result.job_id).unwrap();
-                job.residue.stdout_cid = Some(stdout_upload_result.cid);
-            },
-            
-            // handle stdout objects that have been uploaded to dfs
-            stderr_upload_result = stderr_residue_upload_futures.select_next_some() => { 
-                if false == compute_jobs.contains_key(&stderr_upload_result.job_id) {
-                    println!("Critical error: job is missing.");
-                    //@ what to do here?
-                    continue;
-                }
-                let job = compute_jobs.get_mut(&stderr_upload_result.job_id).unwrap();
-                job.residue.stderr_cid = Some(stderr_upload_result.cid);              
-            },
+            // handle stdout/err objects that have been uploaded to dfs
+            () = fd12_upload_futures.select_next_some() => (),
 
             // handle receipt objects that have been uploaded to dfs
-            receipt_upload_result = receipt_residue_upload_futures.select_next_some() => {
-                // notify the client that the job has been finished and ready to be verified
-                if false == compute_jobs.contains_key(&receipt_upload_result.job_id) {
-                    println!("Critical error: job is missing.");
+            receipt_upload_result = receipt_upload_futures.select_next_some() => {
+                if true == receipt_upload_result.is_none() {
+                    println!("Missing cid for the receipt pod.");
+                    //@ what to do here
+                    continue;
+                }
+                let pod_share_result = receipt_upload_result.unwrap();
+                println!("receipt is public: {:#?}", pod_share_result);
+                // job has been finished and ready to be verified
+                if false == compute_jobs.contains_key(&pod_share_result.job_id) {
+                    println!("Shared pod's job data is missing.");
                     //@ what to do here?
                     continue;
                 }
-                let job = compute_jobs.get_mut(&receipt_upload_result.job_id).unwrap();
+                let job = compute_jobs.get_mut(&pod_share_result.job_id).unwrap();
                 job.status = job::Status::ReadyForVerification;
-                job.residue.receipt_cid = Some(receipt_upload_result.cid.clone()); 
+                job.residue.receipt_cid = Some(pod_share_result.cid); 
+                // persist stdout and stderr too
+                let docker_vol_path = format!("/var/lib/docker/volumes/{}/_data",
+                    job.id);              
+                fd12_upload_futures.push(
+                    persist_fd12(
+                        &dfs_client, &dfs_endpoint, &dfs_cookie,
+                        &dfs_password, job.id.clone(),
+                        String::from("/"), docker_vol_path.clone()
+                    )
+                ); 
             },
         }
     }
@@ -534,10 +419,8 @@ fn job_status_of_peer(
     for job in iter {
         let status = match job.status {
             job::Status::ExecutionFailed => {
-                compute::JobStatus::ExecutionFailed(
-                    job.residue.stdout_cid.clone(),
-                    job.residue.stderr_cid.clone(),
-                )
+                //@ how about sharing cid of stderr?
+                compute::JobStatus::ExecutionFailed(None, None)
             },
             job::Status::ReadyForVerification => {
                 compute::JobStatus::ReadyForVerification(
@@ -557,4 +440,107 @@ fn job_status_of_peer(
         });
     }
     updates
+}
+
+async fn persist_fd12(
+    dfs_client: &reqwest::Client,
+    dfs_endpoint: &String,
+    dfs_cookie: &String,
+    dfs_password: &String,
+    pod_name: String,
+    pod_dest_dir: String,
+    local_base_path: String
+) {
+    // upload stdout(1) and stderr(2) to a private pod
+    // create and open the pod
+    if let Err(e) = dfs::new_pod(
+        dfs_client, dfs_endpoint, dfs_cookie,
+        dfs_password, pod_name.clone()
+    ).await {
+        println!("new pod error: `{e:?}`");
+        return
+    }
+    
+    if let Err(e) = dfs::open_pod(
+        dfs_client, dfs_endpoint, dfs_cookie,
+        dfs_password, pod_name.clone()
+    ).await {
+        println!("open pod error: {e:?}");
+        return        
+    }
+    
+    // upload stdout
+    if let Err(e) = dfs::upload_file(
+        dfs_client, dfs_endpoint, dfs_cookie, 
+        pod_name.clone(), pod_dest_dir.clone(), 
+        format!("{}/stdout", local_base_path)
+    ).await {
+        println!("stdout upload error: `{e:?}`");
+    } else {
+        println!("stdout upload succeeded");
+    }      
+    // upload stderr
+    if let Err(e) = dfs::upload_file(
+        dfs_client, dfs_endpoint, dfs_cookie, 
+        pod_name.clone(), pod_dest_dir.clone(), 
+        format!("{}/stderr", local_base_path)
+    ).await {
+        println!("stderr upload error: `{e:?}`");
+    } else {
+        println!("stderr upload succeeded");
+    }    
+}
+
+async fn persist_receipt(
+    dfs_client: &reqwest::Client,
+    dfs_endpoint: &String,
+    dfs_cookie: &String,
+    dfs_password: &String,
+    pod_name: String,
+    pod_dest_dir: String,
+    local_receipt_path: String,
+    job_id: String,
+) -> Option<PodShareResult> {
+    // create and open the pod
+    if let Err(e) = dfs::new_pod(
+        dfs_client, dfs_endpoint, dfs_cookie,
+        dfs_password, pod_name.clone()
+    ).await {
+        println!("new pod error: `{e:?}`");
+        return None
+    }
+    if let Err(e) = dfs::open_pod(
+        dfs_client, dfs_endpoint, dfs_cookie,
+        dfs_password, pod_name.clone()
+    ).await {
+        println!("open pod error: `{e:?}`");
+        return None
+    }
+    
+    // upload receipt
+    if let Err(e) = dfs::upload_file(
+        dfs_client, dfs_endpoint, dfs_cookie, 
+        pod_name.clone(), pod_dest_dir, 
+        local_receipt_path
+    ).await {
+        println!("receipt upload error: `{e:?}`");
+        return None
+    }
+      
+    // share it
+    match dfs::share_pod(
+        dfs_client, dfs_endpoint, dfs_cookie,
+        dfs_password, pod_name.clone()
+    ).await {
+        Ok(shared_pod) => Some(
+            PodShareResult {
+                job_id: job_id,
+                cid: shared_pod.podSharingReference,            
+            }
+        ),
+        Err(e) => {
+            println!("share receipt error: `{e:?}`");
+            None
+        }
+    }
 }
