@@ -24,10 +24,16 @@ pub enum Status {
     VerificationSucceeded,
 }
 
-// maintains lifecycle for a job
+#[derive(Debug)]
+pub struct JobId {
+    pub local_id: String,       // allows compute(prove) and verification of a job on the same machine    
+    pub network_id: String,     // the actual job known to the clients
+}
+
+// maintain lifecycle of a job
 #[derive(Debug)]
 pub struct Job {
-    pub id: String,
+    pub id: JobId,
     pub owner: PeerId,                      // the client
     pub status: Status,
     pub residue: Residue,                   // cids for stderr, output, receipt, ...
