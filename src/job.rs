@@ -7,7 +7,7 @@ use libp2p::PeerId;
 
 #[derive(Debug)]
 pub struct Residue {
-    pub pod_cid: Option<String>,
+    pub fd12_cid: Option<String>,
     pub receipt_cid: Option<String>,
 }
 

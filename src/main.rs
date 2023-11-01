@@ -47,6 +47,7 @@ struct Cli {
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    println!("<-> server agent for Wholesum network <->");
     
     let cli = Cli::parse();
     if cli.verify == true {
@@ -198,10 +199,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             //     },
                             // };
                             // let job_id = Uuid::from_bytes(bytes_id).to_string();
-                            println!("`job-status` request from client: `{}`",
-                                peer_id);
+                            // println!("`job-status` request from client: `{}`",
+                            //     peer_id);
                             let updates = job_status_of_peer(
-                                &compute_jobs, &verification_jobs, peer_id);                            
+                                &compute_jobs,
+                                &verification_jobs,
+                                peer_id
+                            ); 
                             if updates.len() > 0 {
                                 let sw_req_id = swarm
                                     .behaviour_mut().req_resp
@@ -209,9 +213,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         &peer_id,
                                         notice::Request::UpdateForJobs(updates),
                                     );
-                                println!("jobs' status was sent to the client. req_id: `{sw_req_id}`");                            
+                                // println!("jobs' status was sent to the client. req_id: `{sw_req_id}`");                            
                             }
-                        }
+                        },
+
+                        notice::Notice::Harvest => {
+                            let updates = harvest_jobs_of_peer(
+                                &compute_jobs,
+                                peer_id
+                            );                            
+                            if updates.len() > 0 {
+                                let sw_req_id = swarm
+                                    .behaviour_mut().req_resp
+                                    .send_request(
+                                        &peer_id,
+                                        notice::Request::UpdateForJobs(updates),
+                                    );
+                            }
+                        },
                     };
                 },
                 
@@ -257,7 +276,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     owner: peer_id,
                                     status: job::Status::DockerWarmingUp,
                                     residue: job::Residue {
-                                        pod_cid: None,
+                                        fd12_cid: None,
                                         receipt_cid: None,
                                     },
                                 },
@@ -315,7 +334,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     owner: peer_id,
                                     status: job::Status::DockerWarmingUp,
                                     residue: job::Residue {
-                                        pod_cid: None,
+                                        fd12_cid: None,
                                         receipt_cid: None,
                                     },
                                 },
@@ -416,7 +435,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
             },
             
             // handle stdout/err objects that have been uploaded to dfs
-            _fd12_res = fd12_upload_futures.select_next_some() => (),
+            fd12_upload_result = fd12_upload_futures.select_next_some() => {
+                let pod_share_result: PodShareResult = match fd12_upload_result {
+                    Ok(psr) => psr,
+                    Err(e) => {
+                        println!("Missing cid for the fd12 pod: `{e:?}`");
+                        //@ what to do here
+                        continue
+                    }
+                };
+                println!("fd12 pod is now public: {:#?}", pod_share_result);
+                // job has been finished and ready to be verified
+                if false == compute_jobs.contains_key(&pod_share_result.job_id) {
+                    println!("Residue pod's job data is missing.");
+                    //@ what to do here?
+                    continue;
+                }
+                let job = compute_jobs.get_mut(&pod_share_result.job_id).unwrap();
+                job.status = job::Status::ReadyToHarvest;
+                job.residue.fd12_cid = Some(pod_share_result.cid); 
+
+            },
 
             // handle receipt objects that have been uploaded to dfs
             receipt_upload_result = receipt_upload_futures.select_next_some() => {
@@ -424,14 +463,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Ok(psr) => psr,
                     Err(e) => {
                         println!("Missing cid for the receipt pod: `{e:?}`");
-                        //@ what to do here
+                        //@ what to do here, what if client accepted un-verified jobs?
                         continue
                     }
                 };
                 println!("receipt is now public: {:#?}", pod_share_result);
                 // job has been finished and ready to be verified
                 if false == compute_jobs.contains_key(&pod_share_result.job_id) {
-                    println!("Shared pod's job data is missing.");
+                    println!("Receipt pod's job data is missing.");
                     //@ what to do here?
                     continue;
                 }
@@ -446,7 +485,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         &dfs_client, &dfs_config, &dfs_cookie,
                         job.id.local_id.clone(),
                         String::from("/"),
-                        docker_vol_path.clone()
+                        docker_vol_path.clone(),
+                        job.id.local_id.clone(),
                     )
                 ); 
             },
@@ -454,12 +494,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
+// retrieve all status of jobs owned by the peer_id
 fn job_status_of_peer(
     compute_jobs: &HashMap::<String, job::Job>,
     verification_jobs: &HashMap::<String, job::Job>,
     peer_id: PeerId
 ) -> Vec<compute::JobUpdate> {
-    // retrieve all status of jobs owned by the peer_id
     let mut updates = Vec::<compute::JobUpdate>::new();
     let iter = compute_jobs.values().filter(|&j| j.owner == peer_id)
         .chain(verification_jobs.values().filter(|&j| j.owner == peer_id));
@@ -467,7 +507,7 @@ fn job_status_of_peer(
         let status = match job.status {
             job::Status::ExecutionFailed => {
                 //@ how about sharing cid of stderr?
-                compute::JobStatus::ExecutionFailed(None, None)
+                compute::JobStatus::ExecutionFailed(None)
             },
             
             job::Status::ReadyForVerification => {
@@ -477,7 +517,7 @@ fn job_status_of_peer(
             },
 
             job::Status::VerificationFailed => {
-                compute::JobStatus::VerificationFailed(None)
+                compute::JobStatus::VerificationFailed
             },
 
             job::Status::VerificationSucceeded => {
@@ -499,26 +539,47 @@ fn job_status_of_peer(
     updates
 }
 
+// retrieve all harvest jobs of the peer
+fn harvest_jobs_of_peer(
+    compute_jobs: &HashMap::<String, job::Job>,
+    peer_id: PeerId
+) -> Vec<compute::JobUpdate> {
+    let mut updates = Vec::<compute::JobUpdate>::new();
+    let iter = compute_jobs.values().filter(
+        |&j| j.owner == peer_id && j.status == job::Status::ReadyToHarvest
+    );
+    for job in iter {      
+        if true == job.residue.fd12_cid.is_none() {
+            println!("Warning: missing fd12 cid for job `{}`", job.id.network_id);
+        }  
+        updates.push(compute::JobUpdate {
+            id: job.id.network_id.clone(),
+            status: compute::JobStatus::Harvested(job.residue.fd12_cid.clone()),
+        });
+    }
+    updates
+}
+
 async fn persist_fd12(
     dfs_client: &reqwest::Client,
     dfs_config: &dfs::Config,
     dfs_cookie: &String,
     pod_name: String,
     pod_dest_dir: String,
-    local_base_path: String
-) -> Result<(), Box<dyn Error>> {
+    local_base_path: String,
+    job_id: String,
+) -> Result<PodShareResult, Box<dyn Error>> {
     // upload stdout(1) and stderr(2) to a private pod
-    // create and open the pod
+    // create pod
     dfs::new_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
     ).await?;
-    
+    // open it
     dfs::open_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
-    ).await?;
-    
+    ).await?;    
     // upload stdout
     dfs::upload_file(
         dfs_client, dfs_config, dfs_cookie, 
@@ -528,10 +589,21 @@ async fn persist_fd12(
     // upload stderr
     dfs::upload_file(
         dfs_client, dfs_config, dfs_cookie, 
-        pod_name.clone(), pod_dest_dir.clone(), 
+        pod_name.clone(), pod_dest_dir, 
         format!("{}/stderr", local_base_path)
     ).await?;
-    Ok(())
+    // share it
+    let shared_pod = dfs::share_pod(
+        dfs_client, dfs_config, dfs_cookie,
+        pod_name
+    ).await?;
+    
+    Ok(
+        PodShareResult {
+            job_id: job_id,
+            cid: shared_pod.podSharingReference,            
+        }
+    )
 }
 
 async fn persist_receipt(
@@ -543,17 +615,16 @@ async fn persist_receipt(
     local_receipt_path: String,
     job_id: String,
 ) -> Result<PodShareResult, Box<dyn Error>>  {
-    // create and open the pod
+    // create pod
     dfs::new_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
     ).await?;
-
+    // open it
     dfs::open_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
     ).await?;
-    
     // upload receipt
     dfs::upload_file(
         dfs_client, dfs_config, dfs_cookie, 
@@ -561,7 +632,7 @@ async fn persist_receipt(
         local_receipt_path
     ).await?;
       
-    // share pod
+    // share it
     let shared_pod = dfs::share_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
