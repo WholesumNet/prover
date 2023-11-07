@@ -13,27 +13,17 @@ pub struct Residue {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Status {
-    DockerWarmingUp = 0,     // docker initializing
-    Negotiating,             // making offers
+    DockerWarmingUp = 0,    // docker initializing
+    Negotiating,            // making offers
     Running,
-    ExecutionFinished,       // execution finished
-    ReadyForVerification,    // receipt is uploaded and can be verified
-    ReadyToHarvest,          // verified and ready to harvest
-    ExecutionFailed,         
-    VerificationFailed,      
-    VerificationSucceeded,
-}
-
-#[derive(Debug)]
-pub struct JobId {
-    pub local_id: String,       // allows compute(prove) and verification of a job on the same machine    
-    pub network_id: String,     // the actual job known to the clients
+    ExecutionSucceeded,     // and ready to be verified or to be harvested
+    ExecutionFailed,
 }
 
 // maintain lifecycle of a job
 #[derive(Debug)]
 pub struct Job {
-    pub id: JobId,
+    pub id: String,
     pub owner: PeerId,                      // the client
     pub status: Status,
     pub residue: Residue,                   // cids for stderr, output, receipt, ...
