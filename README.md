@@ -41,7 +41,7 @@ Docker is needed as it is going to run `Risc0` images. Make sure docker runtime 
 ### Run, run, run!
 
 To run a server agent, you would first need to fork the [comms](https://github.com/WholesumNet/comms) library and put it in the parent("..") directory of the server directory.
-Now everything is ready to serve clients. Hit 
-`sudo [server-directory]/target/debug/server -d dfs-user.toml`
-and wait for requests! and yes as of now you would need to run the server with `root` privilages.
+Now everything is ready to serve clients. Hit<br>
+`sudo [server-directory]/target/debug/server -d dfs-user.toml`<br>
+and wait for requests! unfortunately as of now you would need to run the server with `root` privilages.
 
