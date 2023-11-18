@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 price: 1,
                                 hw_specs: compute::ServerSpecs {
                                     gflops: 100,
-                                    ram_amount: 16_000,
+                                    memory_capacity: 16,
                                     cpu_model: "core i7-5500u".to_string(),
                                 },
                             };
