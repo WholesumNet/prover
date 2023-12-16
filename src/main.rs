@@ -53,9 +53,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| "FairOS-dfs config file is missing.")?;
     let dfs_config = toml::from_str(&std::fs::read_to_string(dfs_config_file)?)?;
 
-    // let dfs_endpoint = String::from("http://localhost:9090");
-    // let dfs_username = String::from("whole2");
-    // let dfs_password = String::from("wholewhole00");
     let dfs_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
         .build()
@@ -287,14 +284,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 } 
                 job.status = job::Status::ExecutionSucceeded;
                 println!("Execution was a success.");
-                // each job has at least two pods to store its residue:
-                // - "stderr" and "stdout" are stored in "/" of a private pod
-                //   to be revealed later once job is ready to be harvested
-                // - "receipt" is stored in "/" of a public pod and for verification purposes
+                // a job has at least two pods to store its residue:
+                //   - "fd12": a private pod to store "stderr" and "stdout", harvested once the payment is processed
+                //   - "receipt": a public pod to store Risc0-receipt of the execution, used for verification
                 
-                //@ should get /var/lib.... path from a config file
-                let docker_vol_path = format!("/var/lib/docker/volumes/{}/_data",
-                    process_handle.job_id);                
+                //@ if err, then program exits, must be handled properly
+                let docker_vol_path = job::Job::get_residue_path(&process_handle.job_id)?;
                 // persist and share receipt                              
                 receipt_upload_futures.push(
                     persist_receipt(
@@ -348,8 +343,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let job = jobs.get_mut(&pod_share_result.job_id).unwrap();
                 job.residue.receipt_cid = Some(pod_share_result.cid); 
                 // persist stdout and stderr too
-                let docker_vol_path = format!("/var/lib/docker/volumes/{}/_data",
-                    job.id);
+                //@ if err, then program exits, must be handled properly
+                let docker_vol_path = job::Job::get_residue_path(&job.id)?;
                 fd12_upload_futures.push(
                     persist_fd12(
                         &dfs_client, &dfs_config, &dfs_cookie,
