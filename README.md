@@ -45,3 +45,12 @@ Now everything is ready to serve clients. Hit
 `sudo [server-directory]/target/debug/server -d dfs-user.toml`
 and wait for requests! and yes as of now you would need to run the server with `root` privilages.
 
+### USAGE
+
+Usage: server [OPTIONS]
+
+Options:
+  -d, --dfs-config-file <DFS_CONFIG_FILE>  
+  -h, --help                               Print help
+  -V, --version                            Print version
+
