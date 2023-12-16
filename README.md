@@ -38,12 +38,12 @@ Save it, say, to `dfs-user.toml` and setup is complete. To create a wallet with 
 
 Docker is needed as it is going to run `Risc0` images. Make sure docker runtime is properly setup. This awesome [guide](https://www.digitalocean.com/community/tutorials/how-to-install-and-use-docker-on-ubuntu-20-04) is also helpful.
 
-### Run, run, run!
+### How to run
 
 To run a server agent, you would first need to fork the [comms](https://github.com/WholesumNet/comms) library and put it in the parent("..") directory of the server directory.
 Now everything is ready to serve clients. Hit 
-`sudo [server-directory]/target/debug/server -d dfs-user.toml`
-and wait for requests! and yes as of now you would need to run the server with `root` privilages.
+`cargo run -d dfs-user.toml`
+and wait for compute requests!
 
 ### USAGE
 
