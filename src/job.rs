@@ -1,9 +1,11 @@
-use std::io::Error;
+use std::io::{Error, ErrorKind};
 use core::pin::Pin;
 use futures::stream::{Stream, FusedStream};
 use futures::task::{Context, Poll};
 use async_std::process::{Child, Command, Stdio};
 use libp2p::PeerId;
+use home;
+use std::fs;
 
 #[derive(Debug)]
 pub struct Residue {
@@ -29,6 +31,16 @@ pub struct Job {
     pub residue: Residue,                   // cids for stderr, output, receipt, ...
 }
 
+impl Job {
+    pub fn get_residue_path(job_id: &String) -> Result<String, Error> {
+        let home_dir = home::home_dir()
+            .ok_or_else(|| Error::new(ErrorKind::Other, "Home dir is not available."))?
+            .into_os_string().into_string()
+            .or_else(|_| Err(Error::new(ErrorKind::Other, "OS_String conversion failed.")))?;
+        Ok(format!("{home_dir}/.wholesum/jobs/compute/{job_id}/residue"))
+    }
+}
+
 pub struct ProcessHandle {
     pub job_id: String,
     pub child: Child,
@@ -43,16 +55,14 @@ impl DockerProcessStream {
         DockerProcessStream { process_handles: Vec::<ProcessHandle>::new() }
     }
 
+    // run the docker job
     pub fn add(&mut self, job_id: String, image: String, cmd: String) -> Result<(), Error>{
-        // let cmd_args = vec![
-        //     "run", "--name", "abcd",
-        //     "--mount src=aloha-vol,dst=/root/proofs",
-        //     "test-risc0", "sh", "-c",
-        //     "/root/risc0-0.17.0/examples/target/release/factors"
-        // ];
+        // create job's directory 
+        let src_vol_path = Job::get_residue_path(&job_id)?;
+        fs::create_dir_all(src_vol_path.clone())?;
 
         let container_name = format!("--name={job_id}");
-        let mount = format!("--mount=src={job_id},dst=/root/residue");
+        let mount = format!("--mount=type=bind,src={src_vol_path},dst=/home/prince/residue");
         let cmd_args = vec![
             "run",
             "--rm",
@@ -65,7 +75,6 @@ impl DockerProcessStream {
         ];
         println!("running docker with command `{:?}`", cmd_args);
         match Command::new("docker")
-        // .current_dir(dir)
             .args(cmd_args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
