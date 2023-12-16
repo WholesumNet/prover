@@ -47,6 +47,8 @@ and wait for requests! and yes as of now you would need to run the server with `
 
 ### USAGE
 
+<pre>
+
 Usage: server [OPTIONS]
 
 Options:
@@ -54,3 +56,4 @@ Options:
   -h, --help                               Print help
   -V, --version                            Print version
 
+</pre>
