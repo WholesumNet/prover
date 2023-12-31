@@ -360,7 +360,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         result.job_id.clone(),
                     )
                 );
-
             },
             
             // handle stdout/err objects that have been uploaded to dfs

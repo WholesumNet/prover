@@ -24,12 +24,10 @@ Once Swarm is up and running, you should setup `FairOS-dfs` server. dfs server m
 Once dfs server is up, you need to create a wallet and put the credentials in a file structured as below:
 
 <pre>
-
 # a fairos-dfs client
 endpoint = "http://localhost:9090"
 username = "foo"
 password = "password for foo"
-
 </pre>
 
 Save it, say, to `dfs-user.toml` and setup is complete. To create a wallet with the above credentials, go to the [registration](https://create.fairdatasociety.org) web app and create your desired username. Pleae note that you would need Sepolia(an Ethereum testnet) eth to register users.
@@ -48,12 +46,10 @@ and wait for compute requests!
 ### USAGE
 
 <pre>
-
 Usage: server [OPTIONS]
 
 Options:
   -d, --dfs-config-file <DFS_CONFIG_FILE>  
   -h, --help                               Print help
   -V, --version                            Print version
-
 </pre>
