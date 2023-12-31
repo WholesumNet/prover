@@ -1,24 +1,40 @@
 #![doc = include_str!("../README.md")]
 
 use futures::{
-    prelude::*, select,
-    stream::FuturesUnordered,
+    select,
+    stream::{
+        FuturesUnordered,
+        StreamExt,
+    },
 };
-use std::os::unix::process::ExitStatusExt;
-use std::collections::HashMap;
-use std::error::Error;
-use std::time::Duration;
+
+use std::{
+    error::Error,
+    time::Duration,
+    collections::{
+        HashMap, 
+        HashSet,
+    },
+    // os::unix::process::ExitStatusExt,
+};
+
+use bollard::Docker;
 
 use clap::Parser;
 use reqwest;
 use libp2p::{
+    swarm::{
+        SwarmEvent
+    },
     gossipsub, mdns, request_response,
-    swarm::{SwarmEvent},
     PeerId,
 };
 
 use comms::{
-    p2p::{MyBehaviourEvent}, notice, compute
+    p2p::{
+        MyBehaviourEvent
+    },
+    notice, compute,
 };
 use dstorage::dfs;
 
@@ -32,17 +48,19 @@ struct PodShareResult {
 
 // CLI
 #[derive(Parser, Debug)]
-#[command(name = "Server CLI for Wholesum: p2p verifiable computing marketplace.")]
+#[command(name = "Server CLI for Wholesum")]
 #[command(author = "Wholesum team")]
 #[command(version = "0.1")]
-#[command(about = "Yet another verifiable compute marketplace.", long_about = None)]
+#[command(about = "Wholesum is a P2P verifiable computing marketplace and \
+                   this program is a CLI for server nodes.",
+          long_about = None)]
 struct Cli {
     #[arg(short, long)]
     dfs_config_file: Option<String>,
 }
 
 #[async_std::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn Error + 'static>> {
     println!("<-> `Server` agent for Wholesum network <->");
     
     let cli = Cli::parse();
@@ -67,10 +85,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "Cookie from FairOS-dfs cannot be empty."
     );
 
-    // running jobs(docker containers for compute and verify)
-    let mut compute_job_stream = job::DockerProcessStream::new();
+    println!("Connecting to docker daemon...");
+    let docker_con = Docker::connect_with_socket_defaults()?;
 
     let mut jobs = HashMap::<String, job::Job>::new();
+    // let mut compute_job_stream = job::DockerProcessStream::new();
+    // job execution queue
+    let mut job_execution_futures = FuturesUnordered::new();
+    // 
+    // let mut docker_image_import_futures = FuturesUnordered::new();
+
 
     let mut fd12_upload_futures = FuturesUnordered::new();
     let mut receipt_upload_futures = FuturesUnordered::new();
@@ -216,17 +240,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             if jobs.contains_key(&compute_details.job_id) {
                                 println!("Duplicate compute job, ignored.");
                                 continue;
-                            }
-                            // schedule the job to run                            
-                            if let Err(e) = compute_job_stream.add(
-                                compute_details.job_id.clone(),
-                                compute_details.docker_image.clone(),
-                                compute_details.command.clone()
-                            ) {
+                            }                            
+                            // pull the image first
+                            // let docker_image = compute_details.docker_image.clone();
+                            // if false == docker_image_waitlist.contains_key(&docker_image) {
+                            //     docker_image_waitlist.insert(docker_image.clone(),
+                            //         HashSet::from([compute_details.job_id.clone()]));
+                            // } else {
+                            //     let waitlist = docker_image_waitlist.get_mut(&docker_image);
+                            //     if false == waitlist.contains(&compute_details.job_id) {
+                            //         waitlist.insert(compute_details.job_id.clone());
+                                    
+                            //     }
+                            // }
+                            
+                            // let import_fut = job::import_image(&docker_con, docker_image);
+                            // docker_image_import_futures.push(import_fut);
 
-                                println!("Job spawn error: `{:?}`", e);
-                                continue;
-                            }
+                            let command = vec![
+                                String::from("/bin/sh"),
+                                String::from("-c"),
+                                compute_details.command
+                            ];
+                            // create directory for residue
+                            let residue_path = format!(
+                                "{}/compute/{}/residue",
+                                job::get_residue_path()?,
+                                compute_details.job_id
+                            );
+                            std::fs::create_dir_all(residue_path.clone())?;
+
+                            job_execution_futures.push(
+                                job::run_docker_job(
+                                    &docker_con,
+                                    compute_details.job_id.clone(),
+                                    compute_details.docker_image.clone(),
+                                    command.clone(),
+                                    residue_path.clone()
+                                )
+                            );
+
                             // keep track of running jobs
                             jobs.insert(
                                 compute_details.job_id.clone(),
@@ -250,37 +303,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             },
 
+            // docker image is pulled and ready
+            // image_import_result = docker_image_import_futures.select_next_some() => {
+            //     if let Err(err) = image_import_result {
+            //         println!("{err:?}");
+            //         println!("Check docker for more info on why image import was failed.");
+            //         continue;
+            //     }
+            //     let image_create_info = image_import_result.unwrap();
+            //     println!("{:#?}", image_create_info);
+            //     // create a containner and run the compute job
+                
+            // },
+
             // compute job is finished
-            mut process_handle = compute_job_stream.select_next_some() => {
-                println!("Docker process for compute job `{}` has been finished.",
-                    process_handle.job_id);
-                //@ collect any relevant objects before terminating process
-                let exit_code = match process_handle.child.status().await {
-                    Ok(status) => status.code().unwrap_or_else(
-                        || status.signal().unwrap_or_else(
-                            || {
-                                println!("Docker process was terminated by a signal but \
-                                    the signal is not available.");
-                                99
-                            })
-                    ),
-                    Err(e) => {
-                        println!("Failed to retrieve docker process's exit status: {e:?}");
-                        99
-                    }
-                };                
-                // job has been finished and ready to be verified
-                if false == jobs.contains_key(&process_handle.job_id) {
-                    println!("Critical error: job is missing.");
+            job_exec_res = job_execution_futures.select_next_some() => {                
+                if let Err(failed) = job_exec_res {
+                    println!("Failed to run the job: `{:#?}`", failed);       
+                    //@ job id?
+                    continue;
+                }
+                let result = job_exec_res.unwrap();
+                if false == jobs.contains_key(&result.job_id) {
+                    println!("Critical error: job `{}` is missing.", result.job_id);
                     //@ what to do here?
                     continue;
                 }
-                let job = jobs.get_mut(&process_handle.job_id).unwrap();
-
-                if exit_code != 0 { 
+                let job = jobs.get_mut(&result.job_id).unwrap();
+                if result.exit_status_code != 0 { 
                     job.status = job::Status::ExecutionFailed;
-                    println!("Execution was a failure.");
-                    continue;                  
+                    println!("Job `{}`'s execution finished with error: `{}`",
+                        result.job_id,
+                        result.error_message.unwrap_or_else(|| String::from("")),
+                    );
+                    continue;                 
                 } 
                 job.status = job::Status::ExecutionSucceeded;
                 println!("Execution was a success.");
@@ -289,15 +345,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 //   - "receipt": a public pod to store Risc0-receipt of the execution, used for verification
                 
                 //@ if err, then program exits, must be handled properly
-                let docker_vol_path = job::Job::get_residue_path(&process_handle.job_id)?;
+                let residue_path = format!(
+                    "{}/compute/{}/residue",
+                    job::get_residue_path()?,
+                    result.job_id
+                );
                 // persist and share receipt                              
                 receipt_upload_futures.push(
                     persist_receipt(
                         &dfs_client, &dfs_config, &dfs_cookie,
-                        format!("receipt_{}", process_handle.job_id),
+                        format!("receipt_{}", result.job_id),
                         String::from("/"), 
-                        format!("{}/receipt", docker_vol_path),
-                        process_handle.job_id.clone(),
+                        format!("{}/receipt", residue_path),
+                        result.job_id.clone(),
                     )
                 );
             },
@@ -344,13 +404,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 job.residue.receipt_cid = Some(pod_share_result.cid); 
                 // persist stdout and stderr too
                 //@ if err, then program exits, must be handled properly
-                let docker_vol_path = job::Job::get_residue_path(&job.id)?;
+                let residue_path = format!(
+                    "{}/compute/{}/residue",
+                    job::get_residue_path()?,
+                    job.id
+                );
                 fd12_upload_futures.push(
                     persist_fd12(
                         &dfs_client, &dfs_config, &dfs_cookie,
                         job.id.clone(),
                         String::from("/"),
-                        docker_vol_path.clone(),
+                        residue_path.clone(),
                         job.id.clone(),
                     )
                 ); 
@@ -417,6 +481,8 @@ fn harvest_jobs_of_peer(
     updates
 }
 
+
+// upload stdout(fd 1) and stderr(fd 2) to a private pod
 async fn persist_fd12(
     dfs_client: &reqwest::Client,
     dfs_config: &dfs::Config,
@@ -426,7 +492,6 @@ async fn persist_fd12(
     local_base_path: String,
     job_id: String,
 ) -> Result<PodShareResult, Box<dyn Error>> {
-    // upload stdout(1) and stderr(2) to a private pod
     // create pod
     dfs::new_pod(
         dfs_client, dfs_config, dfs_cookie,

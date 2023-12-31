@@ -1,11 +1,29 @@
-use std::io::{Error, ErrorKind};
-use core::pin::Pin;
-use futures::stream::{Stream, FusedStream};
-use futures::task::{Context, Poll};
-use async_std::process::{Child, Command, Stdio};
+use std::error::Error;
+use futures_util::{
+    TryStreamExt
+};
+// use std::fs;
 use libp2p::PeerId;
 use home;
-use std::fs;
+use bollard::{
+    Docker,
+    models::{
+        // CreateImageInfo,
+        // ContainerCreateResponse,
+        HostConfig,
+        // ContainerWaitResponse,
+        // ContainerWaitExitError,
+    },
+    image::{
+        CreateImageOptions,
+    },
+    container::{
+        CreateContainerOptions,
+        Config, 
+        StartContainerOptions,
+        WaitContainerOptions,
+    },
+};
 
 #[derive(Debug)]
 pub struct Residue {
@@ -31,85 +49,159 @@ pub struct Job {
     pub residue: Residue,                   // cids for stderr, output, receipt, ...
 }
 
-impl Job {
-    pub fn get_residue_path(job_id: &String) -> Result<String, Error> {
-        let home_dir = home::home_dir()
-            .ok_or_else(|| Error::new(ErrorKind::Other, "Home dir is not available."))?
-            .into_os_string().into_string()
-            .or_else(|_| Err(Error::new(ErrorKind::Other, "OS_String conversion failed.")))?;
-        Ok(format!("{home_dir}/.wholesum/jobs/compute/{job_id}/residue"))
-    }
+// get base residue path of the host
+pub fn get_residue_path() -> Result<String, Box<dyn Error>> {
+    let home_dir = home::home_dir()
+        .ok_or_else(|| Box::<dyn Error>::from("Home dir is not available."))?
+        .into_os_string().into_string()
+        .or_else(|_| Err(Box::<dyn Error>::from("OS_String conversion failed.")))?;
+    Ok(format!("{home_dir}/.wholesum/jobs"))
 }
 
-pub struct ProcessHandle {
-    pub job_id: String,
-    pub child: Child,
-}
-
-pub struct DockerProcessStream {
-    process_handles: Vec<ProcessHandle>,
-}
-
-impl DockerProcessStream {
-    pub fn new () -> DockerProcessStream {
-        DockerProcessStream { process_handles: Vec::<ProcessHandle>::new() }
-    }
-
-    // run the docker job
-    pub fn add(&mut self, job_id: String, image: String, cmd: String) -> Result<(), Error>{
-        // create job's directory 
-        let src_vol_path = Job::get_residue_path(&job_id)?;
-        fs::create_dir_all(src_vol_path.clone())?;
-
-        let container_name = format!("--name={job_id}");
-        let mount = format!("--mount=type=bind,src={src_vol_path},dst=/home/prince/residue");
-        let cmd_args = vec![
-            "run",
-            "--rm",
-            container_name.as_str(),
-            mount.as_str(),
-            image.as_str(),
-            "sh",
-            "-c",
-            cmd.as_str(),
-        ];
-        println!("running docker with command `{:?}`", cmd_args);
-        match Command::new("docker")
-            .args(cmd_args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn() {
-
-            Ok(child) => {
-                self.process_handles.push(
-                    ProcessHandle { job_id, child }
-                );
-                return Ok(());
-            },
-            Err(e) => return Err(e),
-        };
-    }
-
-    pub fn is_running(&self, job_id: &String) -> bool {
-        // if in the list, then it's running
-        self.process_handles.iter().any(|jh| jh.job_id == *job_id)
-    }
-}
-
-impl Stream for DockerProcessStream {
-    type Item = ProcessHandle;
-
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> { 
-        for (index, jh) in self.process_handles.iter_mut().enumerate() {
-            if let Ok(Some(_)) = jh.child.try_status() {
-                return Poll::Ready(Some(self.process_handles.remove(index)));
+// import docker image
+pub async fn import_docker_image<'a>(
+    docker_con: &'a Docker,
+    image: &'a String
+) -> Result<(), Box<dyn Error>> {
+    println!("Importing `{}`", image);
+    let mut import_response_stream = docker_con
+        .create_image(
+            Some(CreateImageOptions{
+                from_image: image.clone(),
+                ..Default::default()
+            }),
+            None,
+            None
+        );
+    let mut digest;
+    let mut image_size = -1f64;
+    let mut image_size_read = false;
+    let (mut tp25, mut tp50, mut tp75) = (false, false, false);
+    while let Some(create_image_info) = import_response_stream.try_next().await? {
+        // look up digest 
+        if let Some(status) = create_image_info.status {
+            if true == status.starts_with("Digest:") {
+                (_, digest) = status.split_at(8);
+                println!("Image `{}`, digest: `{}`", image, digest);
             }
         }
-        Poll::Pending        
+        // track progress(pick only quarters: 0%, 25%, 50%, and 75%)
+        if let Some(progress_detail) = create_image_info.progress_detail {
+            let (current, total) = (
+                progress_detail.current.unwrap_or_else(|| 0i64) as f64,
+                progress_detail.total.unwrap_or_else(|| 0i64) as f64
+            );
+            if total > 0f64 {
+                let progress = current / total;
+                if false == image_size_read {
+                    image_size = total / 1_048_576f64;
+                    println!("Image `{image}`, download started, total size: `{image_size:.2} MB`");
+                    image_size_read = true;
+                }
+                if progress > 0.25 && progress < 0.5 {
+                    if tp25 == false {
+                        println!("Image `{}`, downloaded `{:.2}/{:.2} MB` ~25%",
+                            image,
+                            current / 1_048_576f64,
+                            image_size
+                        );
+                        tp25 = true;
+                    }
+                } else if progress > 0.5 && progress < 0.75 {
+                    if tp50 == false {
+                        println!("Image `{}`, downloaded `{:.2}/{:.2} MB` ~50%",
+                            image,
+                            current / 1_048_576f64,
+                            image_size
+                        );
+                        tp50 = true;
+                    }
+                } else if progress > 0.75 {
+                    if tp75 == false {
+                        println!("Image `{}`, downloaded `{:.2}/{:.2} MB` ~75%",
+                            image,
+                            current / 1_048_576f64,
+                            image_size
+                        );
+                        tp75 = true;
+                    }
+                } 
+            }
+        }        
     }
+
+    println!("Image `{}` has been imported.", image);
+    Ok(())
 }
 
-impl FusedStream for DockerProcessStream {
-    fn is_terminated(&self) -> bool { false } 
+#[derive(Debug)]
+pub struct JobExecutionResult {
+    pub job_id: String,
+    pub exit_status_code: i64,
+    pub error_message: Option<String>,
+}
+
+pub async fn run_docker_job<'a>(
+    docker_con: &'a Docker,
+    job_id: String,
+    image: String,
+    command: Vec<String>,
+    src_volume: String,
+) -> Result<JobExecutionResult, Box<dyn Error + 'static>> {
+    // 1- import the docker image
+    import_docker_image(docker_con, &image).await?;
+    // 2- create and start the container
+    let volume = format!("{}:{}",
+        src_volume,
+        "/home/prince/residue");
+    let create_container_resp = docker_con
+        .create_container(
+            Some(CreateContainerOptions{
+                name: job_id.clone(),
+                platform: Some(String::from("linux/amd64")),
+            }),
+            Config {
+                image: Some(image.clone()),
+                cmd: Some(command.clone()),
+                // user: Some(String::from("prince")),   
+                host_config: Some(HostConfig{
+                    binds: Some(vec![volume]),
+                    auto_remove: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        )
+        .await?;
+    println!("Container created successfully, id: `{}`", create_container_resp.id);
+    if create_container_resp.warnings.len() > 0 {
+        println!("Though warnings were raised: {:#?}", create_container_resp.warnings)
+    }
+    docker_con
+        .start_container(
+            create_container_resp.id.as_str(),
+            None::<StartContainerOptions<String>>,
+        )
+        .await?;
+    println!("Container `{}` has been started.", job_id);
+    // 3- wait for the container to finish
+    let mut container_wait_response_stream = docker_con
+        .wait_container(
+            job_id.as_str(),
+            None::<WaitContainerOptions<String>>,
+        );
+    let mut exec_result =  JobExecutionResult {
+        job_id: job_id,
+        exit_status_code: -1,
+        error_message: None,
+    };
+    while let Some(container_wait_response) = container_wait_response_stream.try_next().await? {
+        println!("{container_wait_response:#?}");
+        exec_result.exit_status_code = container_wait_response.status_code;
+        if let Some(wait_error) = container_wait_response.error {
+            exec_result.error_message = wait_error.message;
+        }
+    }
+    
+    Ok(exec_result)
 }
