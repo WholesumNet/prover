@@ -61,7 +61,7 @@ pub fn get_residue_path() -> Result<String, Box<dyn Error>> {
 // import docker image
 pub async fn import_docker_image<'a>(
     docker_con: &'a Docker,
-    image: &'a String
+    image: String
 ) -> Result<(), Box<dyn Error>> {
     println!("Importing `{}`", image);
     let mut import_response_stream = docker_con
@@ -149,7 +149,7 @@ pub async fn run_docker_job<'a>(
     src_volume: String,
 ) -> Result<JobExecutionResult, Box<dyn Error + 'static>> {
     // 1- import the docker image
-    import_docker_image(docker_con, &image).await?;
+    import_docker_image(docker_con, image.clone()).await?;
     // 2- create and start the container
     let volume = format!("{}:{}",
         src_volume,

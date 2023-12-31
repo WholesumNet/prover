@@ -15,7 +15,6 @@ use std::{
         HashMap, 
         HashSet,
     },
-    // os::unix::process::ExitStatusExt,
 };
 
 use bollard::Docker;
@@ -88,12 +87,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     println!("Connecting to docker daemon...");
     let docker_con = Docker::connect_with_socket_defaults()?;
 
+    // let's maintain a list of jobs
     let mut jobs = HashMap::<String, job::Job>::new();
-    // let mut compute_job_stream = job::DockerProcessStream::new();
-    // job execution queue
+    // job execution futures
     let mut job_execution_futures = FuturesUnordered::new();
-    // 
-    // let mut docker_image_import_futures = FuturesUnordered::new();
+    // advanced image pull futures
+    let mut advanced_image_import_futures = FuturesUnordered::new();
 
 
     let mut fd12_upload_futures = FuturesUnordered::new();
@@ -147,11 +146,26 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     // println!("Got message: '{}' with id: {id} from peer: {peer_id}",
                     //          msg_str);
                     // println!("received gossip message: {:#?}", message);
-                    // first byte is message identifier                
+                    // first byte is message identifier
+                    if message.data.len() == 0 {
+                        continue;
+                    }              
                     let notice_req = notice::Notice::try_from(message.data[0])?;
                     match notice_req {
                         notice::Notice::Compute => {
-                            println!("`need compute` request from client: `{peer_id}`");
+                            // advanced image pull requested
+                            if message.data.len() > 1 {
+                                let docker_image = String::from_utf8_lossy(&message.data[1..]).to_string();
+                                advanced_image_import_futures.push(
+                                    job::import_docker_image(
+                                        &docker_con,
+                                        docker_image.clone()
+                                    )
+                                );
+                                println!("Advanced docker image import request for `{docker_image}`");
+                            }
+
+                            println!("`Need compute` request from client: `{peer_id}`");
                             // engage with the client through a direct p2p channel
                             // and express interest in getting the compute job done
                             let offer = compute::Offer {
@@ -241,21 +255,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 println!("Duplicate compute job, ignored.");
                                 continue;
                             }                            
-                            // pull the image first
-                            // let docker_image = compute_details.docker_image.clone();
-                            // if false == docker_image_waitlist.contains_key(&docker_image) {
-                            //     docker_image_waitlist.insert(docker_image.clone(),
-                            //         HashSet::from([compute_details.job_id.clone()]));
-                            // } else {
-                            //     let waitlist = docker_image_waitlist.get_mut(&docker_image);
-                            //     if false == waitlist.contains(&compute_details.job_id) {
-                            //         waitlist.insert(compute_details.job_id.clone());
-                                    
-                            //     }
-                            // }
-                            
-                            // let import_fut = job::import_image(&docker_con, docker_image);
-                            // docker_image_import_futures.push(import_fut);
 
                             let command = vec![
                                 String::from("/bin/sh"),
@@ -303,18 +302,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
             },
 
-            // docker image is pulled and ready
-            // image_import_result = docker_image_import_futures.select_next_some() => {
-            //     if let Err(err) = image_import_result {
-            //         println!("{err:?}");
-            //         println!("Check docker for more info on why image import was failed.");
-            //         continue;
-            //     }
-            //     let image_create_info = image_import_result.unwrap();
-            //     println!("{:#?}", image_create_info);
-            //     // create a containner and run the compute job
-                
-            // },
+            // docker image import result is ready
+            image_import_result = advanced_image_import_futures.select_next_some() => {
+                if let Err(err) = image_import_result {
+                    println!("Advanced image import failed: `{err:#?}`");
+                }               
+            },
 
             // compute job is finished
             job_exec_res = job_execution_futures.select_next_some() => {                
