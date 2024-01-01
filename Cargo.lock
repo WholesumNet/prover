@@ -1565,6 +1565,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af150ab688ff2122fcef229be89cb50dd66af9e01a4ff320cc137eecc9bacc38"
 
 [[package]]
+name = "jocker"
+version = "0.1.0"
+dependencies = [
+ "async-std",
+ "async-trait",
+ "bollard",
+ "env_logger",
+ "futures",
+ "futures-util",
+ "serde",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3092,6 +3105,7 @@ dependencies = [
  "futures",
  "futures-util",
  "home",
+ "jocker",
  "libp2p",
  "libp2p-quic 0.8.0-alpha",
  "num_enum",

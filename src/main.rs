@@ -18,6 +18,7 @@ use std::{
 };
 
 use bollard::Docker;
+use jocker;
 
 use clap::Parser;
 use reqwest;
@@ -37,7 +38,9 @@ use comms::{
 };
 use dstorage::dfs;
 
+
 mod job;
+
 
 #[derive(Debug)]
 struct PodShareResult {
@@ -157,7 +160,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             if message.data.len() > 1 {
                                 let docker_image = String::from_utf8_lossy(&message.data[1..]).to_string();
                                 advanced_image_import_futures.push(
-                                    job::import_docker_image(
+                                    jocker::import_docker_image(
                                         &docker_con,
                                         docker_image.clone()
                                     )
@@ -270,7 +273,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             std::fs::create_dir_all(residue_path.clone())?;
 
                             job_execution_futures.push(
-                                job::run_docker_job(
+                                jocker::run_docker_job(
                                     &docker_con,
                                     compute_details.job_id.clone(),
                                     compute_details.docker_image.clone(),
