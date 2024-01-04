@@ -18,7 +18,10 @@ use std::{
 };
 
 use bollard::Docker;
-use jocker;
+use jocker::exec::{
+    import_docker_image,
+    run_docker_job,
+};
 
 use clap::Parser;
 use reqwest;
@@ -160,7 +163,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             if message.data.len() > 1 {
                                 let docker_image = String::from_utf8_lossy(&message.data[1..]).to_string();
                                 advanced_image_import_futures.push(
-                                    jocker::import_docker_image(
+                                    import_docker_image(
                                         &docker_con,
                                         docker_image.clone()
                                     )
@@ -273,7 +276,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             std::fs::create_dir_all(residue_path.clone())?;
 
                             job_execution_futures.push(
-                                jocker::run_docker_job(
+                                run_docker_job(
                                     &docker_con,
                                     compute_details.job_id.clone(),
                                     compute_details.docker_image.clone(),
@@ -308,15 +311,19 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // docker image import result is ready
             image_import_result = advanced_image_import_futures.select_next_some() => {
                 if let Err(err) = image_import_result {
-                    println!("Advanced image import failed: `{err:#?}`");
-                }               
+                    eprintln!("Advanced image import failed: `{err:#?}`");
+                    //@ what to do with err.who(image name)?
+                    continue;
+                }
+                let _image = image_import_result.unwrap();
             },
 
             // compute job is finished
             job_exec_res = job_execution_futures.select_next_some() => {                
                 if let Err(failed) = job_exec_res {
-                    println!("Failed to run the job: `{:#?}`", failed);       
-                    //@ job id?
+                    eprintln!("Failed to run the job: `{:#?}`", failed);       
+                    //@ what to to with job id?
+                    let _job_id = failed.who;
                     continue;
                 }
                 let result = job_exec_res.unwrap();
