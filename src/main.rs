@@ -15,10 +15,13 @@ use std::{
         HashMap, 
         HashSet,
     },
-    // os::unix::process::ExitStatusExt,
 };
 
 use bollard::Docker;
+use jocker::exec::{
+    import_docker_image,
+    run_docker_job,
+};
 
 use clap::Parser;
 use reqwest;
@@ -32,13 +35,15 @@ use libp2p::{
 
 use comms::{
     p2p::{
-        MyBehaviourEvent
+        LocalBehaviourEvent
     },
     notice, compute,
 };
 use dstorage::dfs;
 
+
 mod job;
+
 
 #[derive(Debug)]
 struct PodShareResult {
@@ -88,12 +93,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     println!("Connecting to docker daemon...");
     let docker_con = Docker::connect_with_socket_defaults()?;
 
+    // let's maintain a list of jobs
     let mut jobs = HashMap::<String, job::Job>::new();
-    // let mut compute_job_stream = job::DockerProcessStream::new();
-    // job execution queue
+    // job execution futures
     let mut job_execution_futures = FuturesUnordered::new();
-    // 
-    // let mut docker_image_import_futures = FuturesUnordered::new();
+    // advanced image pull futures
+    let mut advanced_image_import_futures = FuturesUnordered::new();
 
 
     let mut fd12_upload_futures = FuturesUnordered::new();
@@ -120,14 +125,14 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             //     }
             // },
             event = swarm.select_next_some() => match event {
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                SwarmEvent::Behaviour(LocalBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
                         println!("mDNS discovered a new peer: {peer_id}");
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                     }
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                SwarmEvent::Behaviour(LocalBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                     for (peer_id, _multiaddr) in list {
                         println!("mDNS discovered peer has expired: {peer_id}");
                         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
@@ -138,7 +143,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     println!("Local node is listening on {address}");
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                SwarmEvent::Behaviour(LocalBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source: peer_id,
                     message,
                     ..
@@ -147,11 +152,26 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     // println!("Got message: '{}' with id: {id} from peer: {peer_id}",
                     //          msg_str);
                     // println!("received gossip message: {:#?}", message);
-                    // first byte is message identifier                
+                    // first byte is message identifier
+                    if message.data.len() == 0 {
+                        continue;
+                    }              
                     let notice_req = notice::Notice::try_from(message.data[0])?;
                     match notice_req {
                         notice::Notice::Compute => {
-                            println!("`need compute` request from client: `{peer_id}`");
+                            // advanced image pull requested
+                            if message.data.len() > 1 {
+                                let docker_image = String::from_utf8_lossy(&message.data[1..]).to_string();
+                                advanced_image_import_futures.push(
+                                    import_docker_image(
+                                        &docker_con,
+                                        docker_image.clone()
+                                    )
+                                );
+                                println!("Advanced docker image import request for `{docker_image}`");
+                            }
+
+                            println!("`Need compute` request from client: `{peer_id}`");
                             // engage with the client through a direct p2p channel
                             // and express interest in getting the compute job done
                             let offer = compute::Offer {
@@ -221,7 +241,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 },
                 
                 // incoming response to an earlier compute/verify offer
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
+                SwarmEvent::Behaviour(LocalBehaviourEvent::ReqResp(request_response::Event::Message{
                     peer: peer_id,
                     message: request_response::Message::Response {
                         response,
@@ -241,21 +261,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 println!("Duplicate compute job, ignored.");
                                 continue;
                             }                            
-                            // pull the image first
-                            // let docker_image = compute_details.docker_image.clone();
-                            // if false == docker_image_waitlist.contains_key(&docker_image) {
-                            //     docker_image_waitlist.insert(docker_image.clone(),
-                            //         HashSet::from([compute_details.job_id.clone()]));
-                            // } else {
-                            //     let waitlist = docker_image_waitlist.get_mut(&docker_image);
-                            //     if false == waitlist.contains(&compute_details.job_id) {
-                            //         waitlist.insert(compute_details.job_id.clone());
-                                    
-                            //     }
-                            // }
-                            
-                            // let import_fut = job::import_image(&docker_con, docker_image);
-                            // docker_image_import_futures.push(import_fut);
 
                             let command = vec![
                                 String::from("/bin/sh"),
@@ -271,7 +276,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             std::fs::create_dir_all(residue_path.clone())?;
 
                             job_execution_futures.push(
-                                job::run_docker_job(
+                                run_docker_job(
                                     &docker_con,
                                     compute_details.job_id.clone(),
                                     compute_details.docker_image.clone(),
@@ -303,24 +308,22 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
             },
 
-            // docker image is pulled and ready
-            // image_import_result = docker_image_import_futures.select_next_some() => {
-            //     if let Err(err) = image_import_result {
-            //         println!("{err:?}");
-            //         println!("Check docker for more info on why image import was failed.");
-            //         continue;
-            //     }
-            //     let image_create_info = image_import_result.unwrap();
-            //     println!("{:#?}", image_create_info);
-            //     // create a containner and run the compute job
-                
-            // },
+            // docker image import result is ready
+            image_import_result = advanced_image_import_futures.select_next_some() => {
+                if let Err(err) = image_import_result {
+                    eprintln!("Advanced image import failed: `{err:#?}`");
+                    //@ what to do with err.who(image name)?
+                    continue;
+                }
+                let _image = image_import_result.unwrap();
+            },
 
             // compute job is finished
             job_exec_res = job_execution_futures.select_next_some() => {                
                 if let Err(failed) = job_exec_res {
-                    println!("Failed to run the job: `{:#?}`", failed);       
-                    //@ job id?
+                    eprintln!("Failed to run the job: `{:#?}`", failed);       
+                    //@ what to to with job id?
+                    let _job_id = failed.who;
                     continue;
                 }
                 let result = job_exec_res.unwrap();
