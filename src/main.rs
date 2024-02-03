@@ -654,15 +654,19 @@ async fn persist_fd12(
     job_id: String,
 ) -> Result<PodShareResult, Box<dyn Error>> {
     // create pod
-    dfs::new_pod(
+    if let Err(e) = dfs::new_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
-    ).await?;
+    ).await {
+        eprintln!("Warning: pod creation error: `{e:#?}`");
+    }
     // open it
-    dfs::open_pod(
+    if let Err(e) = dfs::open_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
-    ).await?;    
+    ).await {
+        eprintln!("Warning: pod open error: `{e:#?}`");
+    }   
     // upload stdout
     dfs::upload_file(
         dfs_client, dfs_config, dfs_cookie, 
@@ -699,15 +703,19 @@ async fn persist_receipt(
     job_id: String,
 ) -> Result<PodShareResult, Box<dyn Error>>  {
     // create pod
-    dfs::new_pod(
+    if let Err(e) = dfs::new_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
-    ).await?;
+    ).await {
+        eprintln!("Warning: pod creation error: `{e:#?}`");
+    }
     // open it
-    dfs::open_pod(
+    if let Err(e) = dfs::open_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
-    ).await?;
+    ).await {
+        eprintln!("Warning: pod open error: `{e:#?}`");
+    }
     // upload receipt
     dfs::upload_file(
         dfs_client, dfs_config, dfs_cookie, 
