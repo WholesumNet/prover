@@ -14,7 +14,7 @@ env_logger = "0.10.0"
 futures = "0.3.28"
 futures-util = "0.3.29"
 libp2p = { version = "0.53.2", features = ["async-std", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
-libp2p-quic = { version = "0.8.0-alpha", features = ["async-std"] }
+libp2p-quic = { version = "0.10.2", features = ["async-std"] }
 num_enum = "0.6.1"
 clap = { version = "4.3.21", features = ["derive"] }
 uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }

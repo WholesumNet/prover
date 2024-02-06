@@ -145,16 +145,27 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             .gossipsub
             .subscribe(&topic);
 
-    // bootstrap through bootnodes
+    // bootstrap 
     if false == cli.dev {
+        // get to know bootnodes
         const BOOTNODES: [&str; 1] = [
             "12D3KooWLVDsEUT8YKMbZf3zTihL3iBGoSyZnewWgpdv9B7if7Sn",
         ];
         for peer in &BOOTNODES {
+            swarm.behaviour_mut()
+                .kademlia
+                .add_address(&peer.parse()?, "/ip4/80.209.226.9/tcp/20201".parse()?);
+        }
+        // find myself
+        if let Err(e) = 
             swarm
                 .behaviour_mut()
                 .kademlia
-                .add_address(&peer.parse()?, "/ip4/80.209.226.9/tcp/20201".parse()?);
+                .bootstrap() {
+            eprintln!("bootstrap failed to initiate: `{:?}`", e);
+
+        } else {
+            println!("self-bootstrap is initiated.");
         }
     }
 
@@ -204,6 +215,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 SwarmEvent::NewListenAddr { address, .. } => {
                     println!("Local node is listening on {address}");
                 },
+
+                SwarmEvent::IncomingConnection { .. } => {
+                },
+
+                SwarmEvent::IncomingConnectionError { .. } => {
+                },
+
+                SwarmEvent::OutgoingConnectionError { .. } => {
+                }
 
                 // mdns events
                 SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
