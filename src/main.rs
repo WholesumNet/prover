@@ -8,6 +8,8 @@ use futures::{
     },
 };
 
+use async_std::stream;
+
 use std::{
     error::Error,
     time::Duration,
@@ -25,17 +27,19 @@ use jocker::exec::{
 
 use clap::Parser;
 use reqwest;
+
 use libp2p::{
-    swarm::{
-        SwarmEvent
-    },
     gossipsub, mdns, request_response,
+    identity, identify, kad,  
+    swarm::{SwarmEvent},
     PeerId,
 };
 
+use tracing_subscriber::EnvFilter;
+
 use comms::{
     p2p::{
-        LocalBehaviourEvent
+        MyBehaviourEvent
     },
     notice, compute,
 };
@@ -58,18 +62,30 @@ struct PodShareResult {
 #[command(version = "0.1")]
 #[command(about = "Wholesum is a P2P verifiable computing marketplace and \
                    this program is a CLI for server nodes.",
-          long_about = None)]
+          long_about = None)
+]
 struct Cli {
     #[arg(short, long)]
     dfs_config_file: Option<String>,
+
+    #[arg(long, action)]
+    dev: bool,
+
+    #[arg(short, long)]
+    key_file: Option<String>,
 }
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error + 'static>> {
-    println!("<-> `Server` agent for Wholesum network <->");
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
     
     let cli = Cli::parse();
-    
+    println!("<-> `Server` agent for Wholesum network <->");
+    println!("operating mode: `{}` network",
+        if false == cli.dev { "global" } else { "local(development)" }
+    ); 
     
     // FairOS-dfs http client
     let dfs_config_file = cli.dfs_config_file
@@ -104,15 +120,71 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     let mut fd12_upload_futures = FuturesUnordered::new();
     let mut receipt_upload_futures = FuturesUnordered::new();
         
+    // key 
+    let local_key = {
+        if let Some(key_file) = cli.key_file {
+            let bytes = std::fs::read(key_file).unwrap();
+            identity::Keypair::from_protobuf_encoding(&bytes)?
+        } else {
+            // Create a random key for ourselves
+            let new_key = identity::Keypair::generate_ed25519();
+            let bytes = new_key.to_protobuf_encoding().unwrap();
+            let _bw = std::fs::write("./key.secret", bytes);
+            println!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./ket.secret");
+            new_key
+        }
+    };    
+    println!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
+
     // Libp2p swarm 
-    let mut swarm = comms::p2p::setup_local_swarm();
+    let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
+    let topic = gossipsub::IdentTopic::new("<-- p2p compute bazaar -->");
+    let _ = 
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&topic);
+
+    // bootstrap 
+    if false == cli.dev {
+        // get to know bootnodes
+        const BOOTNODES: [&str; 1] = [
+            "12D3KooWLVDsEUT8YKMbZf3zTihL3iBGoSyZnewWgpdv9B7if7Sn",
+        ];
+        for peer in &BOOTNODES {
+            swarm.behaviour_mut()
+                .kademlia
+                .add_address(&peer.parse()?, "/ip4/80.209.226.9/tcp/20201".parse()?);
+        }
+        // find myself
+        if let Err(e) = 
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .bootstrap() {
+            eprintln!("bootstrap failed to initiate: `{:?}`", e);
+
+        } else {
+            println!("self-bootstrap is initiated.");
+        }
+    }
+
+    // if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
+    //     eprintln!("failed to initiate bootstrapping: {:#?}", e);
+    // }
 
     // read full lines from stdin
     // let mut input = io::BufReader::new(io::stdin()).lines().fuse();
 
     // listen on all interfaces and whatever port the os assigns
-    swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?)?;
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    //@ should read from the config file
+    swarm.listen_on("/ip4/0.0.0.0/udp/20202/quic-v1".parse()?)?;
+    swarm.listen_on("/ip4/0.0.0.0/tcp/20202".parse()?)?;
+    swarm.listen_on("/ip6/::/tcp/20202".parse()?)?;
+    swarm.listen_on("/ip6/::/udp/20202/quic-v1".parse()?)?;
+
+    let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
+
 
     // oh shit here we go again
     loop {
@@ -124,26 +196,149 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             //       println!("Publish error: {e:?}")
             //     }
             // },
+
+            // try to discover new peers
+            () = timer_peer_discovery.select_next_some() => {
+                if true == cli.dev {
+                    continue;
+                }
+                let random_peer_id = PeerId::random();
+                println!("Searching for the closest peers to `{random_peer_id}`");
+                swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .get_closest_peers(random_peer_id);
+            },
+
+            // mdns events
             event = swarm.select_next_some() => match event {
-                SwarmEvent::Behaviour(LocalBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
-                    for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered a new peer: {peer_id}");
-                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                    }
-                },
-
-                SwarmEvent::Behaviour(LocalBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
-                    for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered peer has expired: {peer_id}");
-                        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
-                    }
-                },
-
                 SwarmEvent::NewListenAddr { address, .. } => {
                     println!("Local node is listening on {address}");
                 },
 
-                SwarmEvent::Behaviour(LocalBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                SwarmEvent::IncomingConnection { .. } => {
+                },
+
+                SwarmEvent::IncomingConnectionError { .. } => {
+                },
+
+                SwarmEvent::OutgoingConnectionError { .. } => {
+                }
+
+                // mdns events
+                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                    for (peer_id, _multiaddr) in list {
+                        println!("mDNS discovered a new peer: {peer_id}");
+                        swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .add_explicit_peer(&peer_id);
+                    }
+                },
+
+                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                    for (peer_id, _multiaddr) in list {
+                        println!("mDNS discovered peer has expired: {peer_id}");
+                        swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .remove_explicit_peer(&peer_id);
+                    }
+                },
+
+                // identify events
+                SwarmEvent::Behaviour(MyBehaviourEvent::Identify(identify::Event::Received {
+                    peer_id,
+                    info,
+                    ..
+                })) => {
+                    println!("Inbound identify event `{:#?}`", info);
+                    if false == cli.dev {
+                        for addr in info.listen_addrs {
+                            // if false == addr.iter().any(|item| item == &"127.0.0.1" || item == &"::1"){
+                            swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr);
+                            // }
+                        }
+                    }
+
+                },
+
+                // kademlia events
+                // SwarmEvent::Behaviour(
+                //     MyBehaviourEvent::Kademlia(
+                //         kad::Event::OutboundQueryProgressed {
+                //             result: kad::QueryResult::GetClosestPeers(Ok(ok)),
+                //             ..
+                //         }
+                //     )
+                // ) => {
+                //     // The example is considered failed as there
+                //     // should always be at least 1 reachable peer.
+                //     if ok.peers.is_empty() {
+                //         eprintln!("Query finished with no closest peers.");
+                //     }
+
+                //     println!("Query finished with closest peers: {:#?}", ok.peers);
+                // },
+
+                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                //     result:
+                //         kad::QueryResult::GetClosestPeers(Err(kad::GetClosestPeersError::Timeout {
+                //             ..
+                //         })),
+                //     ..
+                // })) => {
+                //     eprintln!("Query for closest peers timed out");
+                // },
+
+                // SwarmEvent::Behaviour(
+                //     MyBehaviourEvent::Kademlia(
+                //         kad::Event::OutboundQueryProgressed {
+                //             result: kad::QueryResult::Bootstrap(Ok(ok)),
+                //             ..
+                //         }
+                //     )
+                // ) => {                    
+                //     println!("bootstrap inbound: {:#?}", ok);
+                // },
+
+                // SwarmEvent::Behaviour(
+                //     MyBehaviourEvent::Kademlia(
+                //         kad::Event::OutboundQueryProgressed {
+                //             result: kad::QueryResult::Bootstrap(Err(e)),
+                //             ..
+                //         }
+                //     )
+                // ) => {                    
+                //     println!("bootstrap error: {:#?}", e);
+                // },
+
+                // SwarmEvent::Behaviour(
+                //     MyBehaviourEvent::Kademlia(
+                //         kad::Event::RoutingUpdated{
+                //             peer,
+                //             is_new_peer,
+                //             addresses,
+                //             ..
+                //         }
+                //     )
+                // ) => {
+                //     println!("Routing updated:\npeer: `{:?}`\nis new: `{:?}`\naddresses: `{:#?}`",
+                //         peer, is_new_peer, addresses
+                //     );
+                // },
+
+                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::UnroutablePeer{
+                //     peer: peer_id
+                // })) => {
+                //     eprintln!("unroutable peer: {:?}", peer_id);
+                // },
+
+                // gossipsub events
+                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source: peer_id,
                     message,
                     ..
@@ -241,7 +436,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 },
                 
                 // incoming response to an earlier compute/verify offer
-                SwarmEvent::Behaviour(LocalBehaviourEvent::ReqResp(request_response::Event::Message{
+                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
                     peer: peer_id,
                     message: request_response::Message::Response {
                         response,
@@ -304,7 +499,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     }
                 },
 
-                _ => {}
+                _ => println!("{:#?}", event),
 
             },
 
@@ -496,15 +691,19 @@ async fn persist_fd12(
     job_id: String,
 ) -> Result<PodShareResult, Box<dyn Error>> {
     // create pod
-    dfs::new_pod(
+    if let Err(e) = dfs::new_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
-    ).await?;
+    ).await {
+        eprintln!("Warning: pod creation error: `{e:#?}`");
+    }
     // open it
-    dfs::open_pod(
+    if let Err(e) = dfs::open_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
-    ).await?;    
+    ).await {
+        eprintln!("Warning: pod open error: `{e:#?}`");
+    }   
     // upload stdout
     dfs::upload_file(
         dfs_client, dfs_config, dfs_cookie, 
@@ -541,15 +740,19 @@ async fn persist_receipt(
     job_id: String,
 ) -> Result<PodShareResult, Box<dyn Error>>  {
     // create pod
-    dfs::new_pod(
+    if let Err(e) = dfs::new_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
-    ).await?;
+    ).await {
+        eprintln!("Warning: pod creation error: `{e:#?}`");
+    }
     // open it
-    dfs::open_pod(
+    if let Err(e) = dfs::open_pod(
         dfs_client, dfs_config, dfs_cookie,
         pod_name.clone()
-    ).await?;
+    ).await {
+        eprintln!("Warning: pod open error: `{e:#?}`");
+    }
     // upload receipt
     dfs::upload_file(
         dfs_client, dfs_config, dfs_cookie, 
