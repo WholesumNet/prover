@@ -499,7 +499,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     }
                 },
 
-                _ => println!("{:#?}", event),
+                _ => {
+                    // println!("{:#?}", event)
+                },
 
             },
 
