@@ -386,10 +386,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     let need = bincode::deserialize(&message.data)?;
                     // let notice_req = notice::Notice::try_from(message.data[0])?;
                     match need {
-                        notice::Notice::Compute(compute::MatchingCriteria {
-                            memory_capacity,
-                            benchmark_duration_secs,
-                            benchmark_expiry_secs,
+                        notice::Notice::Compute(compute::NeedCompute {
+                            job_id,
+                            criteria
                         }) => {
                             // validate available benchmarks
                             let bench_is_valid = {
@@ -398,7 +397,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     let utc_now = Utc::now();
                                     let bench_timestamp = mr_bench.timestamp.unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
                                     mr_bench.cid.is_some() &&
-                                    utc_now.timestamp() - bench_timestamp.timestamp() < benchmark_expiry_secs.unwrap_or_else(|| 1_000_000u32) as i64
+                                    utc_now.timestamp() - bench_timestamp.timestamp() < criteria.benchmark_expiry_secs.unwrap_or_else(|| 1_000_000i64) as i64
                                 } else {
                                     println!("No benchmarks at all.");
                                     false
@@ -428,6 +427,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             // and express interest in getting the compute job done
                             let bench = benchmarks.values().last().unwrap();
                             let offer = compute::Offer {
+                                job_id: job_id,
                                 hw_specs: compute::ServerSpecs {
                                     gflops: 100,
                                     memory_capacity: 16,
