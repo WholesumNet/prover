@@ -127,8 +127,27 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
     // benchmark maintenance
     let mut benchmarks = HashMap::<String, benchmark::Benchmark>::new();
-    let mut benchmark_execution_futures = FuturesUnordered::new();
-    let mut timer_benchmark_recalc = stream::interval(Duration::from_secs(24 * 60 * 60)).fuse();
+    let mut benchmark_exec_futures = FuturesUnordered::new();
+    {
+        let (bench_job_id, docker_image, bench_command, residue_path) = prepare_benchmark_job()?;
+        benchmark_exec_futures.push(
+            run_docker_job(
+                &docker_con,
+                bench_job_id.clone(),
+                docker_image.clone(),
+                bench_command.clone(),
+                residue_path.clone()
+            )
+        );
+        benchmarks.insert(bench_job_id.clone(), benchmark::Benchmark {
+            id: bench_job_id.clone(),
+            cid: None,
+            timestamp: None,
+        });
+    }
+    let mut timer_benchmark_exec = stream::interval(
+        Duration::from_secs(24 * 60 * 60)
+    ).fuse();
     let mut benchmark_upload_futures = FuturesUnordered::new();
         
     // key 
@@ -222,14 +241,14 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             },
 
             // recalulate benchmarks
-            () = timer_benchmark_recalc.select_next_some() => {
+            () = timer_benchmark_exec.select_next_some() => {
                 //@ to be removed: max 1 job limit
-                if false == benchmark_execution_futures.is_empty() {
+                if false == benchmark_exec_futures.is_empty() {
                     println!("A benchmark is already being executed...");
                     continue;
                 }
                 let (bench_job_id, docker_image, bench_command, residue_path) = prepare_benchmark_job()?;
-                benchmark_execution_futures.push(
+                benchmark_exec_futures.push(
                     run_docker_job(
                         &docker_con,
                         bench_job_id.clone(),
@@ -390,12 +409,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             job_id,
                             criteria
                         }) => {
+                            println!("`Need compute` request from client: `{peer_id}`");
                             // validate available benchmarks
                             let bench_is_valid = {
                                 if let Some(mr_bench) = benchmarks.values().last() { 
                                     println!("Benchmark timestamp: {:?}", mr_bench.timestamp);
                                     let utc_now = Utc::now();
-                                    let bench_timestamp = mr_bench.timestamp.unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
+                                    let bench_timestamp = mr_bench.timestamp.unwrap_or_else(
+                                        || DateTime::from_timestamp(0, 0).unwrap()
+                                    );
                                     mr_bench.cid.is_some() &&
                                     utc_now.timestamp() - bench_timestamp.timestamp() < criteria.benchmark_expiry_secs.unwrap_or_else(|| 1_000_000i64) as i64
                                 } else {
@@ -406,7 +428,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
                             if false == bench_is_valid {
                                 // re-run the benchmark 
-                                println!("Benchmark is invalid.");                                                                
+                                println!("Benchmark is invalid, need to re-calculate it!");                                                                
                                 continue;
                             }
 
@@ -422,7 +444,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             //     println!("Advanced docker image import request for `{docker_image}`");
                             // }
 
-                            println!("`Need compute` request from client: `{peer_id}`");
                             // engage with the client through a direct p2p channel
                             // and express interest in getting the compute job done
                             let bench = benchmarks.values().last().unwrap();
@@ -434,7 +455,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     cpu_model: "core i7-5500u".to_string(),
                                 },
                                 price: 1,
-                                benchmark_cid: bench.cid.clone().unwrap(),
+                                server_benchmark: compute::ServerBenchmark{
+                                    //@ clone?
+                                    cid: bench.cid.clone().unwrap(),
+                                    pod_name: format!("benchmark_{}", bench.id.clone())
+                                }
                             };
                             let sw_req_id = swarm
                                 .behaviour_mut().req_resp
@@ -443,30 +468,27 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     notice::Request::ComputeOffer(offer),
                                 );
                             println!("compute offer was sent to client, id: {sw_req_id}");
-                        },                        
+                        },
 
-                        notice::Notice::JobStatus => {
-                            // job status inquiry
-                            // servers are lazy with job updates so clients need to query for their job's status every so often
-
-                            // println!("`job-status` request from client: `{}`",
-                            //     peer_id);
+                        // status update inquiry
+                        notice::Notice::StatusUpdate(_) => {
+                            println!("`job-status` request from client: `{}`", peer_id);
                             let updates = job_status_of_peer(
                                 &jobs,
                                 peer_id
                             ); 
                             if updates.len() > 0 {
-                                let _sw_req_id = swarm
+                                let _ = swarm
                                     .behaviour_mut().req_resp
                                     .send_request(
                                         &peer_id,
                                         notice::Request::UpdateForJobs(updates),
                                     );
-                                // println!("jobs' status was sent to the client. req_id: `{sw_req_id}`");                            
+                                // println!("jobs' status was sent to the client. req_id: `{_sw_resp_id}`");                            
                             }
                         },
 
-                        notice::Notice::Harvest => {
+                        notice::Notice::Harvest(_) => {
                             let updates = harvest_jobs_of_peer(
                                 &jobs,
                                 peer_id
@@ -484,21 +506,22 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         _ => (),
                     };
                 },
-                
-                // incoming response to an earlier compute/verify offer
+
+                // process responses
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
                     peer: peer_id,
-                    message: request_response::Message::Response {
-                        response,
+                    message: request_response::Message::Request {
+                        request,
+                        channel,
                         ..
                     }
                 })) => {                    
-                    match response {
-                        notice::Response::DeclinedOffer => {
-                            println!("Offer decliend by the client: `{peer_id}`");
-                        },                        
-
-                        notice::Response::ComputeJob(compute_details) => {
+                    match request {
+                        // notice::Response::DeclinedOffer => {
+                        //     println!("Offer decliend by the client: `{peer_id}`");
+                        // },                        
+                        // jobs that require valid benchmarks are wrapped inside responses
+                        notice::Request::ComputeJob(compute_details) => {
                             println!("received `compute job` request from client: `{}`, job: `{:#?}`",
                                 peer_id, compute_details);                           
                             // no duplicate job_ids are allowed
@@ -545,6 +568,91 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             );
                         },
 
+                        // job status inquiry
+                        // notice::Request::JobStatus(_to_be_updated) => {
+                        //     // servers are lazy with job updates so clients need to query for their job's status every so often
+                        //     println!("`job-status` request from client: `{}`", peer_id);
+                        //     let updates = job_status_of_peer(
+                        //         &jobs,
+                        //         peer_id
+                        //     ); 
+                        //     if updates.len() > 0 {
+                        //         let _ = swarm
+                        //             .behaviour_mut().req_resp
+                        //             .send_response(
+                        //                 // &peer_id,
+                        //                 channel,
+                        //                 notice::Response::UpdateForJobs(updates),
+                        //             );
+                        //         // println!("jobs' status was sent to the client. req_id: `{_sw_resp_id}`");                            
+                        //     }
+                        // },
+
+                        _ => (),
+                    }
+                },
+
+                // responses
+                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
+                    peer: peer_id,
+                    message: request_response::Message::Response {
+                        response,
+                        ..
+                    }
+                })) => {                    
+                    match response {
+                        notice::Response::DeclinedOffer => {
+                            println!("Offer decliend by the client: `{peer_id}`");
+                        },                        
+
+                        // // jobs that do not need benchmarks are wrapped inside responses
+                        // notice::Response::ComputeJob(compute_details) => {
+                        //     println!("received `compute job` request from client: `{}`, job: `{:#?}`",
+                        //         peer_id, compute_details);                           
+                        //     // no duplicate job_ids are allowed
+                        //     if jobs.contains_key(&compute_details.job_id) {
+                        //         println!("Duplicate compute job, ignored.");
+                        //         continue;
+                        //     }                            
+
+                        //     let command = vec![
+                        //         String::from("/bin/sh"),
+                        //         String::from("-c"),
+                        //         compute_details.command
+                        //     ];
+                        //     // create directory for residue
+                        //     let residue_path = format!(
+                        //         "{}/compute/{}/residue",
+                        //         job::get_residue_path()?,
+                        //         compute_details.job_id
+                        //     );
+                        //     std::fs::create_dir_all(residue_path.clone())?;
+
+                        //     job_execution_futures.push(
+                        //         run_docker_job(
+                        //             &docker_con,
+                        //             compute_details.job_id.clone(),
+                        //             compute_details.docker_image.clone(),
+                        //             command.clone(),
+                        //             residue_path.clone()
+                        //         )
+                        //     );
+
+                        //     // keep track of running jobs
+                        //     jobs.insert(
+                        //         compute_details.job_id.clone(),
+                        //         job::Job {
+                        //             id: compute_details.job_id.clone(),                                        
+                        //             owner: peer_id,
+                        //             status: job::Status::DockerWarmingUp,
+                        //             residue: job::Residue {
+                        //                 fd12_cid: None,
+                        //                 receipt_cid: None,
+                        //             },
+                        //         },
+                        //     );
+                        // },
+
                         _ => (),
                     }
                 },
@@ -566,7 +674,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // },
 
             // benchmark execution is finished
-            job_exec_res = benchmark_execution_futures.select_next_some() => {
+            job_exec_res = benchmark_exec_futures.select_next_some() => {
                 if let Err(failed) = job_exec_res {
                     eprintln!("Failed to run the benchmark job: `{:#?}`", failed);       
                     continue;

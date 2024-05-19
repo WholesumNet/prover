@@ -753,7 +753,6 @@ dependencies = [
  "futures",
  "libp2p",
  "libp2p-quic",
- "num_enum",
  "serde",
 ]
 
