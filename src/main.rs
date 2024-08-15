@@ -2,6 +2,7 @@
 
 use futures::{
     select,
+    TryFutureExt,
     stream::{
         FuturesUnordered,
         StreamExt,
@@ -95,7 +96,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     
     let ds_key_file = cli.dstorage_key_file
         .ok_or_else(|| "dStorage key file is missing.")?;
-    let ds_key: String = toml::from_str(&std::fs::read_to_string(ds_key_file)?)?;
+    let lighthouse_config: dstorage::lighthouse::Config = 
+        toml::from_str(&std::fs::read_to_string(ds_key_file)?)?;
+    let ds_key = lighthouse_config.apiKey;
 
     let ds_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
@@ -103,6 +106,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
     println!("Connecting to docker daemon...");
     let docker_con = Docker::connect_with_socket_defaults()?;
+    // docker_con.ping()?.map_ok(|_| Ok::<_, ()>(println!("Connection succeeded.")));
 
     // let's maintain a list of jobs
     let mut jobs = HashMap::<String, job::Job>::new();
@@ -149,7 +153,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             let new_key = identity::Keypair::generate_ed25519();
             let bytes = new_key.to_protobuf_encoding().unwrap();
             let _bw = std::fs::write("./key.secret", bytes);
-            println!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./ket.secret");
+            println!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./key.secret");
             new_key
         }
     };    
