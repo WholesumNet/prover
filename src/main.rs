@@ -2,6 +2,7 @@
 
 use futures::{
     select,
+    TryFutureExt,
     stream::{
         FuturesUnordered,
         StreamExt,
@@ -48,7 +49,7 @@ use comms::{
     },
     notice, compute,
 };
-use dstorage::dfs;
+use dstorage::lighthouse;
 
 use uuid::Uuid;
 
@@ -56,7 +57,7 @@ mod job;
 mod benchmark;
 
 #[derive(Debug)]
-struct PodShareResult {
+struct ResidueUploadResult {
     job_id: String,
     cid: String,
 }
@@ -72,7 +73,7 @@ struct PodShareResult {
 ]
 struct Cli {
     #[arg(short, long)]
-    dfs_config_file: Option<String>,
+    dstorage_key_file: Option<String>,
 
     #[arg(long, action)]
     dev: bool,
@@ -93,27 +94,19 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
         if false == cli.dev { "global" } else { "local(development)" }
     ); 
     
-    // FairOS-dfs http client
-    let dfs_config_file = cli.dfs_config_file
-        .ok_or_else(|| "FairOS-dfs config file is missing.")?;
-    let dfs_config = toml::from_str(&std::fs::read_to_string(dfs_config_file)?)?;
+    let ds_key_file = cli.dstorage_key_file
+        .ok_or_else(|| "dStorage key file is missing.")?;
+    let lighthouse_config: dstorage::lighthouse::Config = 
+        toml::from_str(&std::fs::read_to_string(ds_key_file)?)?;
+    let ds_key = lighthouse_config.apiKey;
 
-    let dfs_client = reqwest::Client::builder()
+    let ds_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
-        .build()
-        .expect("FairOS-dfs server should be available and be running to continue.");
-    let dfs_cookie = dfs::login(
-        &dfs_client, 
-        &dfs_config
-    ).await
-    .expect("Login failed, shutting down.");
-    assert_ne!(
-        dfs_cookie, String::from(""),
-        "Cookie from FairOS-dfs cannot be empty."
-    );
+        .build()?;
 
     println!("Connecting to docker daemon...");
     let docker_con = Docker::connect_with_socket_defaults()?;
+    // docker_con.ping()?.map_ok(|_| Ok::<_, ()>(println!("Connection succeeded.")));
 
     // let's maintain a list of jobs
     let mut jobs = HashMap::<String, job::Job>::new();
@@ -127,28 +120,28 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
     // benchmark maintenance
     let mut benchmarks = HashMap::<String, benchmark::Benchmark>::new();
-    let mut benchmark_exec_futures = FuturesUnordered::new();
-    {
-        let (bench_job_id, docker_image, bench_command, residue_path) = prepare_benchmark_job()?;
-        benchmark_exec_futures.push(
-            run_docker_job(
-                &docker_con,
-                bench_job_id.clone(),
-                docker_image.clone(),
-                bench_command.clone(),
-                residue_path.clone()
-            )
-        );
-        benchmarks.insert(bench_job_id.clone(), benchmark::Benchmark {
-            id: bench_job_id.clone(),
-            cid: None,
-            timestamp: None,
-        });
-    }
+    // let mut benchmark_exec_futures = FuturesUnordered::new();
+    // {
+    //     let (bench_job_id, docker_image, bench_command, residue_path) = prepare_benchmark_job()?;
+    //     benchmark_exec_futures.push(
+    //         run_docker_job(
+    //             &docker_con,
+    //             bench_job_id.clone(),
+    //             docker_image.clone(),
+    //             bench_command.clone(),
+    //             residue_path.clone()
+    //         )
+    //     );
+    //     benchmarks.insert(bench_job_id.clone(), benchmark::Benchmark {
+    //         id: bench_job_id.clone(),
+    //         cid: None,
+    //         timestamp: None,
+    //     });
+    // }
     let mut timer_benchmark_exec = stream::interval(
         Duration::from_secs(24 * 60 * 60)
     ).fuse();
-    let mut benchmark_upload_futures = FuturesUnordered::new();
+    // let mut benchmark_upload_futures = FuturesUnordered::new();
         
     // key 
     let local_key = {
@@ -160,7 +153,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             let new_key = identity::Keypair::generate_ed25519();
             let bytes = new_key.to_protobuf_encoding().unwrap();
             let _bw = std::fs::write("./key.secret", bytes);
-            println!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./ket.secret");
+            println!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./key.secret");
             new_key
         }
     };    
@@ -243,25 +236,25 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // recalulate benchmarks
             () = timer_benchmark_exec.select_next_some() => {
                 //@ to be removed: max 1 job limit
-                if false == benchmark_exec_futures.is_empty() {
-                    println!("A benchmark is already being executed...");
-                    continue;
-                }
-                let (bench_job_id, docker_image, bench_command, residue_path) = prepare_benchmark_job()?;
-                benchmark_exec_futures.push(
-                    run_docker_job(
-                        &docker_con,
-                        bench_job_id.clone(),
-                        docker_image.clone(),
-                        bench_command.clone(),
-                        residue_path.clone()
-                    )
-                );
-                benchmarks.insert(bench_job_id.clone(), benchmark::Benchmark {
-                    id: bench_job_id.clone(),
-                    cid: None,
-                    timestamp: None,
-                });
+                // if false == benchmark_exec_futures.is_empty() {
+                //     println!("A benchmark is already being executed...");
+                //     continue;
+                // }
+                // let (bench_job_id, docker_image, bench_command, residue_path) = prepare_benchmark_job()?;
+                // benchmark_exec_futures.push(
+                //     run_docker_job(
+                //         &docker_con,
+                //         bench_job_id.clone(),
+                //         docker_image.clone(),
+                //         bench_command.clone(),
+                //         residue_path.clone()
+                //     )
+                // );
+                // benchmarks.insert(bench_job_id.clone(), benchmark::Benchmark {
+                //     id: bench_job_id.clone(),
+                //     cid: None,
+                //     timestamp: None,
+                // });
             },
 
             // mdns events
@@ -429,7 +422,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             if false == bench_is_valid {
                                 // re-run the benchmark 
                                 println!("Benchmark is invalid, need to re-calculate it!");                                                                
-                                continue;
+                                // continue;
                             }
 
                             // advanced image pull requested
@@ -446,7 +439,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
                             // engage with the client through a direct p2p channel
                             // and express interest in getting the compute job done
-                            let bench = benchmarks.values().last().unwrap();
+                            // let bench = benchmarks.values().last().unwrap();
                             let offer = compute::Offer {
                                 job_id: job_id,
                                 hw_specs: compute::ServerSpecs {
@@ -457,8 +450,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 price: 1,
                                 server_benchmark: compute::ServerBenchmark{
                                     //@ clone?
-                                    cid: bench.cid.clone().unwrap(),
-                                    pod_name: format!("benchmark_{}", bench.id.clone())
+                                    cid: String::from(""), //bench.cid.clone().unwrap(),
+                                    pod_name: String::from("")//format!("benchmark_{}", bench.id.clone())
                                 }
                             };
                             let sw_req_id = swarm
@@ -674,50 +667,49 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // },
 
             // benchmark execution is finished
-            job_exec_res = benchmark_exec_futures.select_next_some() => {
-                if let Err(failed) = job_exec_res {
-                    eprintln!("Failed to run the benchmark job: `{:#?}`", failed);       
-                    continue;
-                }
-                let result = job_exec_res.unwrap();
-                if false == benchmarks.contains_key(&result.job_id) {
-                    println!("Critical error: benchmark job `{}` is missing.", result.job_id);
-                    //@ what to do here?
-                    continue;
-                }
-                let bench = benchmarks.get_mut(&result.job_id).unwrap();
-                if result.exit_status_code != 0 { 
-                    // job.status = job::Status::ExecutionFailed;
-                    println!("Benchmark job `{}`'s execution finished with error: `{}`",
-                        result.job_id,
-                        result.error_message.unwrap_or_else(|| String::from("")),
-                    );
-                    continue;                 
-                } 
-                // job.status = job::Status::ExecutionSucceeded;
-                //@ beware of the time difference between now and the actual timestamp
-                bench.timestamp = Some(Utc::now());
-                println!("Benchmark execution was a success.");
+            // job_exec_res = benchmark_exec_futures.select_next_some() => {
+                // if let Err(failed) = job_exec_res {
+                //     eprintln!("Failed to run the benchmark job: `{:#?}`", failed);       
+                //     continue;
+                // }
+                // let result = job_exec_res.unwrap();
+                // if false == benchmarks.contains_key(&result.job_id) {
+                //     println!("Critical error: benchmark job `{}` is missing.", result.job_id);
+                //     //@ what to do here?
+                //     continue;
+                // }
+                // let bench = benchmarks.get_mut(&result.job_id).unwrap();
+                // if result.exit_status_code != 0 { 
+                //     // job.status = job::Status::ExecutionFailed;
+                //     println!("Benchmark job `{}`'s execution finished with error: `{}`",
+                //         result.job_id,
+                //         result.error_message.unwrap_or_else(|| String::from("")),
+                //     );
+                //     continue;                 
+                // } 
+                // // job.status = job::Status::ExecutionSucceeded;
+                // //@ beware of the time difference between now and the actual timestamp
+                // bench.timestamp = Some(Utc::now());
+                // println!("Benchmark execution was a success.");
 
-                // a benchmark job has outputs a binary json blob to '~/residue/benchmark'
+                // // a benchmark job has outputs a binary json blob to '~/residue/benchmark'
                 
-                //@ if err, then program exits, must be handled properly
-                let residue_path = format!(
-                    "{}/compute/{}/residue",
-                    job::get_residue_path()?,
-                    result.job_id
-                );
-                // persist and share benchmark                              
-                benchmark_upload_futures.push(
-                    persist_benchmark(
-                        &dfs_client, &dfs_config, &dfs_cookie,
-                        format!("benchmark_{}", result.job_id),
-                        String::from("/"), 
-                        format!("{}/benchmark", residue_path),
-                        result.job_id.clone(),
-                    )
-                );
-            },
+                // //@ if err, then program exits, must be handled properly
+                // let residue_path = format!(
+                //     "{}/compute/{}/residue",
+                //     job::get_residue_path()?,
+                //     result.job_id
+                // );
+                // // persist and share benchmark                              
+                // benchmark_upload_futures.push(
+                //     persist_benchmark(
+                //         &ds_client,
+                //         &ds_key,
+                //         format!("{residue_path}/benchmark", ),
+                //         result.job_id.clone(),
+                //     )
+                // );
+            // },
 
             // compute job is finished
             job_exec_res = job_execution_futures.select_next_some() => {                
@@ -757,55 +749,54 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 // persist and share receipt                              
                 receipt_upload_futures.push(
                     persist_receipt(
-                        &dfs_client, &dfs_config, &dfs_cookie,
-                        format!("receipt_{}", result.job_id),
-                        String::from("/"), 
-                        format!("{}/receipt", residue_path),
+                        &ds_client,
+                        &ds_key,
+                        format!("{residue_path}/receipt"),
                         result.job_id.clone(),
                     )
                 );
             },
             
-            // handle stdout/err objects that have been uploaded to dfs
+            // handle stdout/err objects that have been uploaded to dStorage
             fd12_upload_result = fd12_upload_futures.select_next_some() => {
-                let pod_share_result: PodShareResult = match fd12_upload_result {
-                    Ok(psr) => psr,
+                let upload_result: ResidueUploadResult = match fd12_upload_result {
+                    Ok(ur) => ur,
                     Err(e) => {
                         println!("Missing cid for the fd12 pod: `{e:?}`");
                         //@ what to do here
                         continue
                     }
                 };
-                println!("fd12 pod is now public: {:#?}", pod_share_result);
-                if false == jobs.contains_key(&pod_share_result.job_id) {
+                println!("fd12 pod is now public: {:#?}", upload_result);
+                if false == jobs.contains_key(&upload_result.job_id) {
                     println!("Residue pod's job data is missing.");
                     //@ what to do here?
                     continue;
                 }
-                let job = jobs.get_mut(&pod_share_result.job_id).unwrap();
-                job.residue.fd12_cid = Some(pod_share_result.cid); 
+                let job = jobs.get_mut(&upload_result.job_id).unwrap();
+                job.residue.fd12_cid = Some(upload_result.cid); 
 
             },
 
-            // handle receipt objects that have been uploaded to dfs
+            // handle receipt objects that have been uploaded to dStorage
             receipt_upload_result = receipt_upload_futures.select_next_some() => {
-                let pod_share_result = match receipt_upload_result {
-                    Ok(psr) => psr,
+                let upload_result = match receipt_upload_result {
+                    Ok(ur) => ur,
                     Err(e) => {
                         println!("Missing cid for the receipt pod: `{e:?}`");
                         //@ what to do here, what if client accepted un-verified jobs?
                         continue
                     }
                 };
-                println!("receipt is now public: {:#?}", pod_share_result);
+                println!("receipt is now public: {:#?}", upload_result);
                 // job has been finished and ready to be verified
-                if false == jobs.contains_key(&pod_share_result.job_id) {
+                if false == jobs.contains_key(&upload_result.job_id) {
                     println!("Receipt pod's job data is missing.");
                     //@ what to do here?
                     continue;
                 }
-                let job = jobs.get_mut(&pod_share_result.job_id).unwrap();
-                job.residue.receipt_cid = Some(pod_share_result.cid); 
+                let job = jobs.get_mut(&upload_result.job_id).unwrap();
+                job.residue.receipt_cid = Some(upload_result.cid); 
                 // persist stdout and stderr too
                 //@ if err, then program exits, must be handled properly
                 let residue_path = format!(
@@ -815,34 +806,33 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 );
                 fd12_upload_futures.push(
                     persist_fd12(
-                        &dfs_client, &dfs_config, &dfs_cookie,
-                        job.id.clone(),
-                        String::from("/"),
+                        &ds_client,
+                        &ds_key,
                         residue_path.clone(),
                         job.id.clone(),
                     )
                 ); 
             },
 
-            // handle benchmark has been uploaded to dfs
-            bench_upload_result = benchmark_upload_futures.select_next_some() => {
-                let pod_share_result: PodShareResult = match bench_upload_result {
-                    Ok(psr) => psr,
-                    Err(e) => {
-                        println!("Missing cid for the benchmark pod: `{e:?}`");
-                        //@ what to do here
-                        continue
-                    }
-                };
-                println!("Benchmakr pod is now public: {:#?}", pod_share_result);
-                if false == benchmarks.contains_key(&pod_share_result.job_id) {
-                    println!("Residue pod's benchmark job data is missing.");
-                    //@ what to do here?
-                    continue;
-                }
-                let bench = benchmarks.get_mut(&pod_share_result.job_id).unwrap();
-                bench.cid = Some(pod_share_result.cid); 
-            },
+            // handle benchmark has been uploaded to dStorage
+            // bench_upload_result = benchmark_upload_futures.select_next_some() => {
+            //     let upload_result: ResidueUploadResult = match bench_upload_result {
+            //         Ok(ur) => ur,
+            //         Err(e) => {
+            //             println!("Missing cid for the benchmark pod: `{e:?}`");
+            //             //@ what to do here
+            //             continue
+            //         }
+            //     };
+            //     println!("Benchmakr pod is now public: {:#?}", upload_result);
+            //     if false == benchmarks.contains_key(&upload_result.job_id) {
+            //         println!("Residue pod's benchmark job data is missing.");
+            //         //@ what to do here?
+            //         continue;
+            //     }
+            //     let bench = benchmarks.get_mut(&upload_result.job_id).unwrap();
+            //     bench.cid = Some(upload_result.cid); 
+            // },
         }
     }
 }
@@ -930,140 +920,78 @@ fn harvest_jobs_of_peer(
 }
 
 
-// upload stdout(fd 1) and stderr(fd 2) to a private pod
+// upload stdout(fd 1) and stderr(fd 2) to a dStorage
 async fn persist_fd12(
-    dfs_client: &reqwest::Client,
-    dfs_config: &dfs::Config,
-    dfs_cookie: &String,
-    pod_name: String,
-    pod_dest_dir: String,
+    ds_client: &reqwest::Client,
+    ds_key: &str,
     local_base_path: String,
     job_id: String,
-) -> Result<PodShareResult, Box<dyn Error>> {
-    // create pod
-    if let Err(e) = dfs::new_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        pod_name.clone()
-    ).await {
-        eprintln!("Warning: pod creation error: `{e:#?}`");
-    }
-    // open it
-    if let Err(e) = dfs::open_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        pod_name.clone()
-    ).await {
-        eprintln!("Warning: pod open error: `{e:#?}`");
-    }   
+) -> Result<ResidueUploadResult, Box<dyn Error>> {
+    //@ combine stdout and stderr into one and upload once
     // upload stdout
-    dfs::upload_file(
-        dfs_client, dfs_config, dfs_cookie, 
-        pod_name.clone(), pod_dest_dir.clone(), 
-        format!("{}/stdout", local_base_path)
+    let upload_res = lighthouse::upload_file(
+        ds_client, 
+        ds_key.to_owned(),
+        format!("{local_base_path}/stdout"),
+        format!("stdout-{job_id}")
     ).await?; 
     // upload stderr
-    dfs::upload_file(
-        dfs_client, dfs_config, dfs_cookie, 
-        pod_name.clone(), pod_dest_dir, 
-        format!("{}/stderr", local_base_path)
+    let _ = lighthouse::upload_file(
+        ds_client, 
+        ds_key.to_owned(),
+        format!("{local_base_path}/stderr"),
+        format!("stderr-{job_id}")
     ).await?;
-    // share it
-    let shared_pod = dfs::share_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        pod_name
-    ).await?;
-    
+
     Ok(
-        PodShareResult {
+        ResidueUploadResult {
             job_id: job_id,
-            cid: shared_pod.podSharingReference,            
+            cid: upload_res.Hash            
         }
     )
 }
 
 async fn persist_receipt(
-    dfs_client: &reqwest::Client,
-    dfs_config: &dfs::Config,
-    dfs_cookie: &String,
-    pod_name: String,
-    pod_dest_dir: String,
+    ds_client: &reqwest::Client,
+    ds_key: &str,
     local_receipt_path: String,
     job_id: String,
-) -> Result<PodShareResult, Box<dyn Error>>  {
-    // create pod
-    if let Err(e) = dfs::new_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        pod_name.clone()
-    ).await {
-        eprintln!("Warning: pod creation error: `{e:#?}`");
-    }
-    // open it
-    if let Err(e) = dfs::open_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        pod_name.clone()
-    ).await {
-        eprintln!("Warning: pod open error: `{e:#?}`");
-    }
+) -> Result<ResidueUploadResult, Box<dyn Error>>  {
     // upload receipt
-    dfs::upload_file(
-        dfs_client, dfs_config, dfs_cookie, 
-        pod_name.clone(), pod_dest_dir, 
-        local_receipt_path
+    let upload_res = lighthouse::upload_file(
+        ds_client,
+        ds_key.to_owned(),
+        local_receipt_path,
+        format!("receipt-{job_id}")
     ).await?;
       
-    // share it
-    let shared_pod = dfs::share_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        pod_name.clone()
-    ).await?;
-    
     Ok(
-        PodShareResult {
+        ResidueUploadResult {
             job_id: job_id,
-            cid: shared_pod.podSharingReference,            
+            cid: upload_res.Hash
         }
     )
 }
 
 async fn persist_benchmark(
-    dfs_client: &reqwest::Client,
-    dfs_config: &dfs::Config,
-    dfs_cookie: &String,
-    pod_name: String,
-    pod_dest_dir: String,
+    ds_client: &reqwest::Client,
+    ds_key: &str,
     local_benchmark_path: String,
     job_id: String,
-) -> Result<PodShareResult, Box<dyn Error>>  {
-    // create pod
-    if let Err(e) = dfs::new_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        pod_name.clone()
-    ).await {
-        eprintln!("Warning: pod creation error: `{e:#?}`");
-    }
-    // open it
-    if let Err(e) = dfs::open_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        pod_name.clone()
-    ).await {
-        eprintln!("Warning: pod open error: `{e:#?}`");
-    }
+) -> Result<ResidueUploadResult, Box<dyn Error>>  {
+    
     // upload receipt
-    dfs::upload_file(
-        dfs_client, dfs_config, dfs_cookie, 
-        pod_name.clone(), pod_dest_dir, 
-        local_benchmark_path
-    ).await?;
-      
-    // share it
-    let shared_pod = dfs::share_pod(
-        dfs_client, dfs_config, dfs_cookie,
-        pod_name.clone()
+    let upload_res = lighthouse::upload_file(
+        ds_client,
+        ds_key.to_owned(),
+        local_benchmark_path, 
+        format!("benchmark-{job_id}")
     ).await?;
     
     Ok(
-        PodShareResult {
+        ResidueUploadResult {
             job_id: job_id,
-            cid: shared_pod.podSharingReference,            
+            cid: upload_res.Hash
         }
     )
 }
