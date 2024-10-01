@@ -2,7 +2,6 @@
 
 use futures::{
     select,
-    TryFutureExt,
     stream::{
         FuturesUnordered,
         StreamExt,
@@ -12,17 +11,15 @@ use futures::{
 use async_std::stream;
 
 use std::{
+    fs,
     error::Error,
     time::Duration,
     collections::{
         HashMap, 
-        HashSet,
     },
 };
 
 use bincode;
-use serde::{Deserialize};
-
 use chrono::{DateTime, Utc};
 
 use bollard::Docker;
@@ -52,6 +49,7 @@ use comms::{
 use dstorage::lighthouse;
 
 use uuid::Uuid;
+use anyhow;
 
 mod job;
 mod benchmark;
@@ -110,13 +108,17 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
     // let's maintain a list of jobs
     let mut jobs = HashMap::<String, job::Job>::new();
-    // job execution futures
+    // pull till job requirements are met, ie cids are downloaded
+    let mut prepare_job_reqs_futures = FuturesUnordered::new();
+    // pull till cids are download
+    // let mut blob_download_futures = FuturesUnordered::new();
+    // pull jobs' execution
     let mut job_execution_futures = FuturesUnordered::new();
     // advanced image pull futures
     // let mut advanced_image_import_futures = FuturesUnordered::new();
     // dstorage futures
-    let mut fd12_upload_futures = FuturesUnordered::new();
-    let mut receipt_upload_futures = FuturesUnordered::new();
+    // let mut fd12_upload_futures = FuturesUnordered::new();
+    // let mut receipt_upload_futures = FuturesUnordered::new();
 
     // benchmark maintenance
     let mut benchmarks = HashMap::<String, benchmark::Benchmark>::new();
@@ -481,20 +483,20 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             }
                         },
 
-                        notice::Notice::Harvest(_) => {
-                            let updates = harvest_jobs_of_peer(
-                                &jobs,
-                                peer_id
-                            );                            
-                            if updates.len() > 0 {
-                                let _sw_req_id = swarm
-                                    .behaviour_mut().req_resp
-                                    .send_request(
-                                        &peer_id,
-                                        notice::Request::UpdateForJobs(updates),
-                                    );
-                            }
-                        },
+                        // notice::Notice::Harvest(_) => {
+                        //     let updates = harvest_jobs_of_peer(
+                        //         &jobs,
+                        //         peer_id
+                        //     );                            
+                        //     if updates.len() > 0 {
+                        //         let _sw_req_id = swarm
+                        //             .behaviour_mut().req_resp
+                        //             .send_request(
+                        //                 &peer_id,
+                        //                 notice::Request::UpdateForJobs(updates),
+                        //             );
+                        //     }
+                        // },
 
                         _ => (),
                     };
@@ -513,52 +515,22 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         // notice::Response::DeclinedOffer => {
                         //     println!("Offer decliend by the client: `{peer_id}`");
                         // },                        
-                        // jobs that require valid benchmarks are wrapped inside responses
                         notice::Request::ComputeJob(compute_details) => {
-                            println!("received `compute job` request from client: `{}`, job: `{:#?}`",
-                                peer_id, compute_details);                           
+                            println!("[info] New job from client: `{}`: `{:#?}`",
+                                peer_id, compute_details
+                            );
                             // no duplicate job_ids are allowed
                             if jobs.contains_key(&compute_details.job_id) {
-                                println!("Duplicate compute job, ignored.");
+                                println!("[warn] Duplicate compute job, ignored.");
                                 continue;
-                            }                            
-
-                            let command = vec![
-                                String::from("/bin/sh"),
-                                String::from("-c"),
-                                compute_details.command
-                            ];
-                            // create directory for residue
-                            let residue_path = format!(
-                                "{}/compute/{}/residue",
-                                job::get_residue_path()?,
-                                compute_details.job_id
-                            );
-                            std::fs::create_dir_all(residue_path.clone())?;
-
-                            job_execution_futures.push(
-                                run_docker_job(
-                                    &docker_con,
-                                    compute_details.job_id.clone(),
-                                    compute_details.docker_image.clone(),
-                                    command.clone(),
-                                    residue_path.clone()
+                            }
+                            prepare_job_reqs_futures.push(
+                                prepare_job_reqs(
+                                    &ds_client,
+                                    compute_details,
+                                    peer_id
                                 )
-                            );
-
-                            // keep track of running jobs
-                            jobs.insert(
-                                compute_details.job_id.clone(),
-                                job::Job {
-                                    id: compute_details.job_id.clone(),                                        
-                                    owner: peer_id,
-                                    status: job::Status::DockerWarmingUp,
-                                    residue: job::Residue {
-                                        fd12_cid: None,
-                                        receipt_cid: None,
-                                    },
-                                },
-                            );
+                            );                            
                         },
 
                         // job status inquiry
@@ -692,7 +664,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 // bench.timestamp = Some(Utc::now());
                 // println!("Benchmark execution was a success.");
 
-                // // a benchmark job has outputs a binary json blob to '~/residue/benchmark'
+                // a benchmark job has outputs a binary json blob to '~/residue/benchmark'
                 
                 // //@ if err, then program exits, must be handled properly
                 // let residue_path = format!(
@@ -711,108 +683,157 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 // );
             // },
 
-            // compute job is finished
-            job_exec_res = job_execution_futures.select_next_some() => {                
-                if let Err(failed) = job_exec_res {
-                    eprintln!("Failed to run the job: `{:#?}`", failed);       
+            // job is ready to start execution
+            prep_res = prepare_job_reqs_futures.select_next_some() => {
+                if let Err(failed) = prep_res {
+                    eprintln!("[warn] Failed to prepare job requirements: {:#?}", failed);
+                    //@ wtd here?
+                    continue;
+                }
+                let (compute_details, owner) = prep_res.unwrap();
+                let command = vec![
+                    String::from("/bin/sh"),
+                    String::from("-c"),
+                    compute_details.command
+                ];
+                //@ ugly af, polish it fren
+                // create directory for residue
+                let src_vol = format!(
+                    "{}/compute/{}/residue",
+                    job::get_residue_path()?,
+                    compute_details.job_id
+                );
+                std::fs::create_dir_all(src_vol.clone())?;
+
+                job_execution_futures.push(
+                    run_docker_job(
+                        &docker_con,
+                        compute_details.job_id.clone(),
+                        compute_details.docker_image.clone(),
+                        command.clone(),
+                        src_vol.clone()
+                    )
+                );
+
+                // keep track of running jobs
+                jobs.insert(
+                    compute_details.job_id.clone(),
+                    job::Job {
+                        id: compute_details.job_id.clone(),                                        
+                        owner: owner,
+                        status: job::Status::DockerWarmingUp,
+                        residue: job::Residue {
+                            fd12_cid: None,
+                            receipt_cid: None,
+                        },
+                        compute_type: compute_details.compute_type
+                    },
+                );
+            },
+
+            // job is finished
+            er = job_execution_futures.select_next_some() => {                
+                if let Err(failed) = er {
+                    eprintln!("[warn] Failed to run the job: `{:#?}`", failed);       
                     //@ what to to with job id?
                     let _job_id = failed.who;
                     continue;
                 }
-                let result = job_exec_res.unwrap();
-                if false == jobs.contains_key(&result.job_id) {
-                    println!("Critical error: job `{}` is missing.", result.job_id);
+                let exec_res = er.unwrap();
+                if false == jobs.contains_key(&exec_res.job_id) {
+                    println!("[warn] Critical error, job `{}` data is missing.", exec_res.job_id);
                     //@ what to do here?
                     continue;
                 }
-                let job = jobs.get_mut(&result.job_id).unwrap();
-                if result.exit_status_code != 0 { 
+                let job = jobs.get_mut(&exec_res.job_id).unwrap();
+                if exec_res.exit_status_code != 0 { 
                     job.status = job::Status::ExecutionFailed;
                     println!("Job `{}`'s execution finished with error: `{}`",
-                        result.job_id,
-                        result.error_message.unwrap_or_else(|| String::from("")),
+                        exec_res.job_id,
+                        exec_res.error_message.unwrap_or_else(|| String::from("")),
                     );
                     continue;                 
                 } 
                 job.status = job::Status::ExecutionSucceeded;
-                println!("Execution was a success.");
-                // a job has at least two pods to store its residue:
-                //   - "fd12": a private pod to store "stderr" and "stdout", harvested once the payment is processed
-                //   - "receipt": a public pod to store Risc0-receipt of the execution, used for verification
-                
-                //@ if err, then program exits, must be handled properly
+                println!("[info] Execution was a success, now upload the residue to dstorage.");
+                // a job has at least two output items to store:
+                //   - "fd12": contains "stderr" and "stdout"
+                //   - "receipt": Risc0-receipt of the execution
                 let residue_path = format!(
                     "{}/compute/{}/residue",
                     job::get_residue_path()?,
-                    result.job_id
+                    exec_res.job_id
                 );
-                // persist and share receipt                              
-                receipt_upload_futures.push(
-                    persist_receipt(
-                        &ds_client,
-                        &ds_key,
-                        format!("{residue_path}/receipt"),
-                        result.job_id.clone(),
-                    )
-                );
+                // upload the receipt
+                let upload_res = lighthouse::upload_file(
+                    &ds_client,
+                    &ds_key,
+                    format!("{residue_path}/out.sr"), //@ client should specify this
+                    format!("succint-receipt-{}", exec_res.job_id)
+                ).await;
+                if let Err(failed) = upload_res {
+                    eprintln!("[warn] Receipt upload for failed: {:#?}", failed);
+                    //@ remember to retry for successfully finished jobs
+                    continue;
+                }
+                let cid = upload_res.unwrap().cid;
+                job.residue.receipt_cid = Some(cid);
+                println!("[info] Job `{}` is ready for harvest.", job.id);
             },
             
             // handle stdout/err objects that have been uploaded to dStorage
-            fd12_upload_result = fd12_upload_futures.select_next_some() => {
-                let upload_result: ResidueUploadResult = match fd12_upload_result {
-                    Ok(ur) => ur,
-                    Err(e) => {
-                        println!("Missing cid for the fd12 pod: `{e:?}`");
-                        //@ what to do here
-                        continue
-                    }
-                };
-                println!("fd12 pod is now public: {:#?}", upload_result);
-                if false == jobs.contains_key(&upload_result.job_id) {
-                    println!("Residue pod's job data is missing.");
-                    //@ what to do here?
-                    continue;
-                }
-                let job = jobs.get_mut(&upload_result.job_id).unwrap();
-                job.residue.fd12_cid = Some(upload_result.cid); 
-
-            },
+            // fd12_upload_result = fd12_upload_futures.select_next_some() => {
+            //     let upload_result: ResidueUploadResult = match fd12_upload_result {
+            //         Ok(ur) => ur,
+            //         Err(e) => {
+            //             println!("Missing cid for the fd12 pod: `{e:?}`");
+            //             //@ what to do here
+            //             continue
+            //         }
+            //     };
+            //     println!("fd12 pod is now public: {:#?}", upload_result);
+            //     if false == jobs.contains_key(&upload_result.job_id) {
+            //         println!("Residue pod's job data is missing.");
+            //         //@ what to do here?
+            //         continue;
+            //     }
+            //     let job = jobs.get_mut(&upload_result.job_id).unwrap();
+            //     job.residue.fd12_cid = Some(upload_result.cid); 
+            // },
 
             // handle receipt objects that have been uploaded to dStorage
-            receipt_upload_result = receipt_upload_futures.select_next_some() => {
-                let upload_result = match receipt_upload_result {
-                    Ok(ur) => ur,
-                    Err(e) => {
-                        println!("Missing cid for the receipt pod: `{e:?}`");
-                        //@ what to do here, what if client accepted un-verified jobs?
-                        continue
-                    }
-                };
-                println!("receipt is now public: {:#?}", upload_result);
-                // job has been finished and ready to be verified
-                if false == jobs.contains_key(&upload_result.job_id) {
-                    println!("Receipt pod's job data is missing.");
-                    //@ what to do here?
-                    continue;
-                }
-                let job = jobs.get_mut(&upload_result.job_id).unwrap();
-                job.residue.receipt_cid = Some(upload_result.cid); 
-                // persist stdout and stderr too
-                //@ if err, then program exits, must be handled properly
-                let residue_path = format!(
-                    "{}/compute/{}/residue",
-                    job::get_residue_path()?,
-                    job.id
-                );
-                fd12_upload_futures.push(
-                    persist_fd12(
-                        &ds_client,
-                        &ds_key,
-                        residue_path.clone(),
-                        job.id.clone(),
-                    )
-                ); 
-            },
+            // ur = receipt_upload_futures.select_next_some() => {
+            //     if let (failed) = ur {
+            //         eprintln!("[warn] Receipt upload failed: `{:#?}`", failed);
+            //             //@ wtd here
+            //             continue;
+            //     }
+            //     let upload_result = ur.unwrap();
+            //     println!("receipt is now public: {:#?}", upload_result);
+            //     // job has been finished and ready to be verified
+            //     if false == jobs.contains_key(&upload_result.job_id) {
+            //         println!("Receipt pod's job data is missing.");
+            //         //@ what to do here?
+            //         continue;
+            //     }
+            //     let job = jobs.get_mut(&upload_result.job_id).unwrap();
+            //     job.residue.receipt_cid = Some(upload_result.cid); 
+            //     // persist stdout and stderr too
+            //     //@ if err, then program exits, must be handled properly
+            //     let residue_path = format!(
+            //         "{}/compute/{}/residue",
+            //         job::get_residue_path()?,
+            //         job.id
+            //     );
+            //     fd12_upload_futures.push(
+            //         persist_fd12(
+            //             &ds_client,
+            //             &ds_key,
+            //             residue_path.clone(),
+            //             job.id.clone(),
+            //         )
+            //     ); 
+            // },
 
             // handle benchmark has been uploaded to dStorage
             // bench_upload_result = benchmark_upload_futures.select_next_some() => {
@@ -838,7 +859,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 }
 
 // prepare benchmark job details
-fn prepare_benchmark_job()
+fn _prepare_benchmark_job()
  -> Result<(String, String, Vec<String>, String), Box<dyn Error>> {
 
     let bench_job_id = Uuid::new_v4().simple().to_string()[..7].to_string();
@@ -860,6 +881,27 @@ fn prepare_benchmark_job()
     )
 }
 
+// set job up for execution
+async fn prepare_job_reqs(
+    ds_client: &reqwest::Client,
+    compute_details: compute::ComputeDetails,
+    owner: PeerId,
+) -> anyhow::Result<(compute::ComputeDetails, PeerId)> {
+    // download blob from dstorage and store it on docker volume of the job
+    let save_to = format!(
+        "{}/compute/{}/residue/{}",
+        job::get_residue_path()?,
+        &compute_details.job_id,
+        "in.seg" //@ client should specify this
+    );
+    fs::create_dir_all(save_to.clone())?;
+    lighthouse::download_file(
+        ds_client,
+        &compute_details.input[0],
+        save_to
+    ).await?;
+    Ok((compute_details, owner))
+}
 
 // retrieve all status of jobs owned by the peer_id
 fn job_status_of_peer(
@@ -867,13 +909,20 @@ fn job_status_of_peer(
     peer_id: PeerId
 ) -> Vec<compute::JobUpdate> {
     let mut updates = Vec::<compute::JobUpdate>::new();
-    let iter = jobs.values().filter(|&j| j.owner == peer_id);
-    for job in iter {
+    for job in jobs.values() {
+        if job.owner != peer_id {
+            continue;
+        }
         let status = match job.status {
-            job::Status::ExecutionSucceeded => 
-                compute::JobStatus::ExecutionSucceeded(
-                    job.residue.receipt_cid.clone()
-            ),
+            job::Status::ExecutionSucceeded => {
+                if true == job.residue.receipt_cid.is_some() {
+                    compute::JobStatus::ExecutionSucceeded(
+                        job.residue.receipt_cid.clone().unwrap()
+                    )
+                } else {
+                    compute::JobStatus::Running
+                }
+            },
 
             //@ how about sharing cid of stderr?
             job::Status::ExecutionFailed => 
@@ -885,43 +934,45 @@ fn job_status_of_peer(
         updates.push(compute::JobUpdate {
             id: job.id.clone(),
             status: status,
+            compute_type: job.compute_type.clone(),
         });
     }
     updates
 }
 
 // retrieve all harvest jobs of the peer
-fn harvest_jobs_of_peer(
-    jobs: &HashMap::<String, job::Job>,
-    peer_id: PeerId
-) -> Vec<compute::JobUpdate> {
-    let mut updates = Vec::<compute::JobUpdate>::new();
-    let iter = jobs.values().filter(
-        |&j| 
-        j.owner == peer_id &&
-        j.status == job::Status::ExecutionSucceeded
-    );
-    for job in iter {      
-        if true == job.residue.fd12_cid.is_none() {
-            println!("Warning: missing fd12 cid for the job `{}` that is being harvested.",
-                job.id);
-        }  
-        updates.push(compute::JobUpdate {
-            id: job.id.clone(),
-            status: compute::JobStatus::Harvested(
-                compute::HarvestDetails {
-                    fd12_cid: job.residue.fd12_cid.clone(),
-                    receipt_cid: job.residue.receipt_cid.clone(),
-                }
-            ),
-        });
-    }
-    updates
-}
+// fn harvest_jobs_of_peer(
+//     jobs: &HashMap::<String, job::Job>,
+//     peer_id: PeerId
+// ) -> Vec<compute::JobUpdate> {
+//     let mut updates = Vec::<compute::JobUpdate>::new();
+//     let iter = jobs.values().filter(
+//         |&j| 
+//         j.owner == peer_id &&
+//         j.status == job::Status::ExecutionSucceeded
+//     );
+//     for job in iter {      
+//         if true == job.residue.fd12_cid.is_none() {
+//             println!("Warning: missing fd12 cid for the job `{}` that is being harvested.",
+//                 job.id);
+//         }  
+//         updates.push(compute::JobUpdate {
+//             id: job.id.clone(),
+//             status: compute::JobStatus::Harvested(
+//                 compute::HarvestDetails {
+//                     fd12_cid: job.residue.fd12_cid.clone(),
+//                     receipt_cid: job.residue.receipt_cid.clone(),
+//                 }
+//             ),
+//             compute_type: job.compute_type,
+//         });
+//     }
+//     updates
+// }
 
 
 // upload stdout(fd 1) and stderr(fd 2) to a dStorage
-async fn persist_fd12(
+async fn _persist_fd12(
     ds_client: &reqwest::Client,
     ds_key: &str,
     local_base_path: String,
@@ -931,14 +982,14 @@ async fn persist_fd12(
     // upload stdout
     let upload_res = lighthouse::upload_file(
         ds_client, 
-        ds_key.to_owned(),
+        ds_key,
         format!("{local_base_path}/stdout"),
         format!("stdout-{job_id}")
     ).await?; 
     // upload stderr
     let _ = lighthouse::upload_file(
         ds_client, 
-        ds_key.to_owned(),
+        ds_key,
         format!("{local_base_path}/stderr"),
         format!("stderr-{job_id}")
     ).await?;
@@ -946,12 +997,12 @@ async fn persist_fd12(
     Ok(
         ResidueUploadResult {
             job_id: job_id,
-            cid: upload_res.Hash            
+            cid: upload_res.cid            
         }
     )
 }
 
-async fn persist_receipt(
+async fn _persist_receipt(
     ds_client: &reqwest::Client,
     ds_key: &str,
     local_receipt_path: String,
@@ -960,7 +1011,7 @@ async fn persist_receipt(
     // upload receipt
     let upload_res = lighthouse::upload_file(
         ds_client,
-        ds_key.to_owned(),
+        ds_key,
         local_receipt_path,
         format!("receipt-{job_id}")
     ).await?;
@@ -968,22 +1019,22 @@ async fn persist_receipt(
     Ok(
         ResidueUploadResult {
             job_id: job_id,
-            cid: upload_res.Hash
+            cid: upload_res.cid
         }
     )
 }
 
-async fn persist_benchmark(
+async fn _persist_benchmark(
     ds_client: &reqwest::Client,
     ds_key: &str,
     local_benchmark_path: String,
     job_id: String,
-) -> Result<ResidueUploadResult, Box<dyn Error>>  {
+) -> anyhow::Result<ResidueUploadResult>  {
     
     // upload receipt
     let upload_res = lighthouse::upload_file(
         ds_client,
-        ds_key.to_owned(),
+        ds_key,
         local_benchmark_path, 
         format!("benchmark-{job_id}")
     ).await?;
@@ -991,7 +1042,7 @@ async fn persist_benchmark(
     Ok(
         ResidueUploadResult {
             job_id: job_id,
-            cid: upload_res.Hash
+            cid: upload_res.cid
         }
     )
 }

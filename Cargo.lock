@@ -1011,6 +1011,7 @@ dependencies = [
 name = "dstorage"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-std",
  "async-stream",
  "async-trait",
@@ -3575,6 +3576,7 @@ dependencies = [
 name = "server"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-std",
  "async-trait",
  "bincode",
