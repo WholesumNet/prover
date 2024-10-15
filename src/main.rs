@@ -401,7 +401,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     // let notice_req = notice::Notice::try_from(message.data[0])?;
                     match need {
                         notice::Notice::Compute(compute::NeedCompute {
-                            job_id,
                             criteria
                         }) => {
                             println!("`Need compute` request from client: `{peer_id}`");
@@ -443,7 +442,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             // and express interest in getting the compute job done
                             // let bench = benchmarks.values().last().unwrap();
                             let offer = compute::Offer {
-                                job_id: job_id,
+                                compute_type: criteria.compute_type,
                                 hw_specs: compute::ServerSpecs {
                                     gflops: 100,
                                     memory_capacity: 16,

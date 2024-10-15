@@ -32,12 +32,10 @@ pub struct Job {
 
 // get base residue path of the host
 pub fn get_residue_path() -> anyhow::Result<String> {
+    let err_msg = "Home dir is not available";
     let binding = home::home_dir()
-        .ok_or_else(|| anyhow::Error::msg("Home dir is not available"))?;
+        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
     let home_dir = binding.to_str()
-        .ok_or_else(|| anyhow::Error::msg("Home dir is not available"))?;
-        // .ok_or_else(|| Box::<dyn Error>::from("Home dir is not available."))?
-        // .into_os_string().into_string()
-        // .or_else(|_| Err(Box::<dyn Error>::from("OS_String conversion failed.")))?;
+        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
     Ok(format!("{home_dir}/.wholesum/jobs"))
 }
