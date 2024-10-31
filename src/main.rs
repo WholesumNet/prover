@@ -53,6 +53,7 @@ use anyhow;
 
 mod job;
 mod benchmark;
+mod reprove;
 
 #[derive(Debug)]
 struct ResidueUploadResult {
@@ -441,6 +442,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             // engage with the client through a direct p2p channel
                             // and express interest in getting the compute job done
                             // let bench = benchmarks.values().last().unwrap();
+                            //@ needed compute mathces with my skills?
                             let offer = compute::Offer {
                                 compute_type: criteria.compute_type,
                                 hw_specs: compute::ServerSpecs {
@@ -896,7 +898,7 @@ async fn prepare_job_reqs(
     fs::create_dir_all(save_to.clone())?;
     lighthouse::download_file(
         ds_client,
-        &compute_details.input[0],
+        &compute_details.input,
         save_to
     ).await?;
     Ok((compute_details, owner))
