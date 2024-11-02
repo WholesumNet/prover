@@ -23,9 +23,10 @@ use std::{
 
 use anyhow;
 
-async fn prove_and_lift(
+pub async fn prove_and_lift(
+    job_id: String,
     in_seg_path: PathBuf
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<(String, Vec<u8>)> {
     let r0_client = ApiClient::from_env()?;
     // fisrt prove
     let mut now = Instant::now();
@@ -57,13 +58,14 @@ async fn prove_and_lift(
         let asset: Asset = lift_receipt.try_into()?;
         asset.as_bytes()?.into()
     };
-    Ok(blob)
+    Ok((job_id, blob))
 }
 
-fn join(
+pub async fn join(
+    job_id: String,
     left_sr_path: PathBuf,
     right_sr_path: PathBuf,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<(String, Vec<u8>)> {
     let r0_client = ApiClient::from_env()?;
     let now = Instant::now();
     let join_receipt = r0_client
@@ -80,13 +82,13 @@ fn join(
         let asset: Asset = join_receipt.try_into()?;
         asset.as_bytes()?.into()
     };
-    Ok(blob)
+    Ok((job_id, blob))
 }
 
-fn stark_to_snark(
-    in_sr_path: PathBuf,
-    out_receipt_path: PathBuf,
-) -> anyhow::Result<Receipt> {
+pub async fn stark_to_snark(
+    job_id: String,
+    in_sr_path: PathBuf
+) -> anyhow::Result<(String, Vec<u8>)> {
     let r0_client = ApiClient::from_env()?;
     // fist transform via identity_p254
     let now = Instant::now();
@@ -118,7 +120,7 @@ fn stark_to_snark(
     // and then extract the compressed snark(Groth16)
     let asset: Asset = p254_receipt.try_into()?;    
     let now = Instant::now();    
-    let receipt = r0_client
+    let groth16_receipt = r0_client
         .compress(
             &ProverOpts::groth16(),
             Asset::Inline(asset.as_bytes()?),
@@ -126,10 +128,9 @@ fn stark_to_snark(
         )?;
     let dur = now.elapsed().as_secs();
     println!("compress took `{dur} secs`");
-    let _ = fs::write(
-        &out_receipt_path,
-        bincode::serialize(&receipt)?
-    );
-    println!("your Groth16 receipt is ready!`");
-    Ok(receipt)
+    let blob: Vec<u8> = {
+        let asset: Asset = groth16_receipt.try_into()?;
+        asset.as_bytes()?.into()
+    };
+    Ok((job_id, blob))
 }

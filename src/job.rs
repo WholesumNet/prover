@@ -6,14 +6,11 @@ use anyhow;
 
 #[derive(Debug)]
 pub struct Residue {
-    pub fd12_cid: Option<String>,
     pub receipt_cid: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Status {
-    DockerWarmingUp = 0,    // docker initializing
-    Negotiating,            // hammering deals
     Running,
     ExecutionSucceeded,     // execution finished successfully but blobs need to be uploaded
     ExecutionFailed,
