@@ -3984,6 +3984,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "prover"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-std",
+ "async-trait",
+ "bincode",
+ "bollard",
+ "chrono",
+ "clap",
+ "comms",
+ "dstorage",
+ "env_logger",
+ "futures",
+ "futures-util",
+ "home",
+ "jocker",
+ "libp2p",
+ "libp2p-quic",
+ "num_enum",
+ "reqwest 0.11.27",
+ "risc0-circuit-recursion",
+ "risc0-zkp",
+ "risc0-zkvm",
+ "serde",
+ "toml",
+ "tracing",
+ "tracing-subscriber 0.3.18",
+ "uuid",
+]
+
+[[package]]
 name = "puffin"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4900,38 +4932,6 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "time",
-]
-
-[[package]]
-name = "server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-std",
- "async-trait",
- "bincode",
- "bollard",
- "chrono",
- "clap",
- "comms",
- "dstorage",
- "env_logger",
- "futures",
- "futures-util",
- "home",
- "jocker",
- "libp2p",
- "libp2p-quic",
- "num_enum",
- "reqwest 0.11.27",
- "risc0-circuit-recursion",
- "risc0-zkp",
- "risc0-zkvm",
- "serde",
- "toml",
- "tracing",
- "tracing-subscriber 0.3.18",
- "uuid",
 ]
 
 [[package]]

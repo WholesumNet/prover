@@ -34,5 +34,5 @@ pub fn get_residue_path() -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::Error::msg(err_msg))?;
     let home_dir = binding.to_str()
         .ok_or_else(|| anyhow::Error::msg(err_msg))?;
-    Ok(format!("{home_dir}/.wholesum/jobs"))
+    Ok(format!("{home_dir}/.wholesum/jobs/prover"))
 }

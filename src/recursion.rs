@@ -23,17 +23,19 @@ use std::{
 
 use anyhow;
 
-pub async fn prove_and_lift(
+pub async fn 
+prove_and_lift(
     job_id: String,
-    in_seg_path: PathBuf
+    seg_path: PathBuf
 ) -> anyhow::Result<(String, Vec<u8>)> {
     let r0_client = ApiClient::from_env()?;
     // fisrt prove
+    println!("proving `{}`", seg_path.display());
     let mut now = Instant::now();
     let segment_receipt = r0_client
         .prove_segment(
             &ProverOpts::succinct(),
-            Asset::Path(in_seg_path),
+            Asset::Path(seg_path),
             AssetRequest::Inline,
     )?; 
     let prove_dur = now.elapsed().as_secs();
@@ -61,7 +63,8 @@ pub async fn prove_and_lift(
     Ok((job_id, blob))
 }
 
-pub async fn join(
+pub async fn
+join(
     job_id: String,
     left_sr_path: PathBuf,
     right_sr_path: PathBuf,
@@ -85,7 +88,8 @@ pub async fn join(
     Ok((job_id, blob))
 }
 
-pub async fn stark_to_snark(
+pub async fn
+stark_to_snark(
     job_id: String,
     in_sr_path: PathBuf
 ) -> anyhow::Result<(String, Vec<u8>)> {

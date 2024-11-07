@@ -53,7 +53,7 @@ use anyhow;
 
 mod job;
 mod benchmark;
-mod reprove;
+mod recursion;
 
 #[derive(Debug)]
 struct ResidueUploadResult {
@@ -63,11 +63,11 @@ struct ResidueUploadResult {
 
 // CLI
 #[derive(Parser, Debug)]
-#[command(name = "Server CLI for Wholesum")]
+#[command(name = "Prover CLI for Wholesum")]
 #[command(author = "Wholesum team")]
 #[command(version = "0.1")]
 #[command(about = "Wholesum is a P2P verifiable computing marketplace and \
-                   this program is a CLI for server nodes.",
+                   this program is a CLI for prover nodes.",
           long_about = None)
 ]
 struct Cli {
@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
         .try_init();
     
     let cli = Cli::parse();
-    println!("<-> `Server` agent for Wholesum network <->");
+    println!("<-> `Prover` agent for Wholesum network <->");
     println!("Operating mode: `{}` network",
         if false == cli.dev { "global" } else { "local(development)" }
     ); 
@@ -396,7 +396,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     //          msg_str);
                     // println!("received gossip message: {:#?}", message);
                     // first byte is message identifier
-                    let need = bincode::deserialize(&message.data)?;
+                    let need = bincode::deserialize(&message.data).unwrap();
                     // let notice_req = notice::Notice::try_from(message.data[0])?;
                     match need {
                         notice::Notice::Compute(compute::NeedCompute {
@@ -689,47 +689,47 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     //@ wtd here?
                     continue;
                 }
-                let (compute_details, owner, job_path) = prep_res.unwrap();
-                match compute_details.compute_type {
+                let prepared_job = prep_res.unwrap();
+                match prepared_job.compute_details.compute_type {
                     compute::ComputeType::ProveAndLift => {
                         prove_execution_futures.push(
-                            reprove::prove_and_lift(
-                                compute_details.job_id.clone(),
-                                format!("{job_path}/segment").into()
+                            recursion::prove_and_lift(
+                                prepared_job.compute_details.job_id.clone(),
+                                prepared_job.inputs[0].clone().into()
                             )
                         );
                     },
 
                     compute::ComputeType::Join => {
                         join_execution_futures.push(
-                            reprove::join(
-                                compute_details.job_id.clone(),
-                                format!("{job_path}/left_receipt").into(),
-                                format!("{job_path}/right_receipt").into()
+                            recursion::join(
+                                prepared_job.compute_details.job_id.clone(),
+                                prepared_job.inputs[0].clone().into(),
+                                prepared_job.inputs[1].clone().into()
                             )
                         );
                     },
 
                     compute::ComputeType::Snark => {
                         snark_execution_futures.push(
-                            reprove::stark_to_snark(
-                                compute_details.job_id.clone(),
-                                format!("{job_path}/stark_receipt").into()
+                            recursion::stark_to_snark(
+                                prepared_job.compute_details.job_id.clone(),
+                                prepared_job.inputs[0].clone().into()
                             )
                         );
                     },
                 };
                 // keep track of running jobs
                 jobs.insert(
-                    compute_details.job_id.clone(),
+                    prepared_job.compute_details.job_id.clone(),
                     job::Job {
-                        id: compute_details.job_id.clone(),                                        
-                        owner: owner,
+                        id: prepared_job.compute_details.job_id.clone(),                                        
+                        owner: prepared_job.owner,
                         status: job::Status::Running,
                         residue: job::Residue {
                             receipt_cid: None,
                         },
-                        compute_type: compute_details.compute_type
+                        compute_type: prepared_job.compute_details.compute_type
                     },
                 );
             },
@@ -756,7 +756,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     continue;
                 }
                 let job = jobs.get_mut(&job_id).unwrap();
-                let _ = post_execution(&ds_client, &ds_key, job, blob).await?;
+                let _ = post_job_execution(&ds_client, &ds_key, job, blob).await?;
             },
 
             // join is finished
@@ -781,7 +781,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     continue;
                 }
                 let job = jobs.get_mut(&job_id).unwrap();
-                let _ = post_execution(&ds_client, &ds_key, job, blob).await?;                                
+                let _ = post_job_execution(&ds_client, &ds_key, job, blob).await?;                                
             },
 
             // stark_to_snark is finished
@@ -806,7 +806,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     continue;
                 }
                 let job = jobs.get_mut(&job_id).unwrap();
-                let _ = post_execution(&ds_client, &ds_key, job, blob).await?;                
+                let _ = post_job_execution(&ds_client, &ds_key, job, blob).await?;                
             },
             
             // handle benchmark has been uploaded to dStorage
@@ -855,28 +855,65 @@ fn _prepare_benchmark_job()
     )
 }
 
+#[derive(Debug, Clone)]
+struct PreparedJob {
+    pub compute_details: compute::ComputeDetails,
+    owner: PeerId,
+    inputs: Vec<String>,
+}
+
 // set job up for execution
 async fn prepare_job_reqs(
     ds_client: &reqwest::Client,
     compute_details: compute::ComputeDetails,
     owner: PeerId,
-) -> anyhow::Result<(compute::ComputeDetails, PeerId, String)> {
+) -> anyhow::Result<PreparedJob> {
+    println!("{compute_details:?}");
     // download blob from dstorage and store it on docker volume of the job
-    let save_to = format!(
+    let blob_location = format!(
         "{}/compute/{}/input",
         job::get_residue_path()?,
         &compute_details.job_id
     );
-    fs::create_dir_all(save_to.clone())?;
-    lighthouse::download_file(
-        ds_client,
-        &compute_details.input,
-        save_to.clone()
-    ).await?;
-    Ok((compute_details, owner, save_to))
+    fs::create_dir_all(blob_location.clone())?;
+    let blob_file_paths = match &compute_details.input_type {
+        compute::ComputeJobInputType::Prove(cid) => {
+            let blob_file_path = format!("{blob_location}/{}", compute_details.job_id);
+            lighthouse::download_file(
+                ds_client,
+                &cid,
+                blob_file_path.clone()
+            ).await?;
+            vec![blob_file_path]
+        },
+
+        compute::ComputeJobInputType::Join(left_cid, right_cid) => {
+            // left cid
+            let left_blob_file_path = format!("{blob_location}/{}-left", compute_details.job_id);
+            lighthouse::download_file(
+                ds_client,
+                &left_cid,
+                left_blob_file_path.clone()
+            ).await?;
+            // right cid
+            let right_blob_file_path = format!("{blob_location}/{}-right", compute_details.job_id);
+            lighthouse::download_file(
+                ds_client,
+                &right_cid,
+                right_blob_file_path.clone()
+            ).await?;
+            vec![left_blob_file_path, right_blob_file_path]
+        }
+    };
+    
+    Ok(PreparedJob{
+        compute_details: compute_details,
+        owner: owner,
+        inputs: blob_file_paths
+    })
 }
 
-async fn post_execution(
+async fn post_job_execution(
     ds_client: &reqwest::Client,
     ds_key: &str,
     job: &mut job::Job,
@@ -902,13 +939,14 @@ async fn post_execution(
         format!("receipt-{}", &job.id)
     ).await;
     if let Err(failed) = upload_res {
-        eprintln!("[warn] Receipt upload for failed: {:#?}", failed);
+        eprintln!("[warn] Receipt upload for `{}` failed: `{:#?}`",
+            &job.id, failed
+        );
         //@ remember to retry for successfully finished jobs
         return Err(failed);
     }
     let cid = upload_res.unwrap().cid;
     job.residue.receipt_cid = Some(cid);
-    println!("[info] Job `{}` is ready for harvest.", &job.id);
     Ok(())
 }
 
