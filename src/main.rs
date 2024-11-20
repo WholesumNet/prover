@@ -690,6 +690,20 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     continue;
                 }
                 let prepared_job = prep_res.unwrap();
+                // keep track of running jobs
+                jobs.insert(
+                    prepared_job.compute_details.job_id.clone(),
+                    job::Job {
+                        id: prepared_job.compute_details.job_id.clone(),                                        
+                        owner: prepared_job.owner,
+                        status: job::Status::Running,
+                        residue: job::Residue {
+                            receipt_cid: None,
+                        },
+                        compute_type: prepared_job.compute_details.compute_type.clone()
+                    },
+                );
+                // run it
                 match prepared_job.compute_details.compute_type {
                     compute::ComputeType::ProveAndLift => {
                         prove_execution_futures.push(
@@ -718,20 +732,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             )
                         );
                     },
-                };
-                // keep track of running jobs
-                jobs.insert(
-                    prepared_job.compute_details.job_id.clone(),
-                    job::Job {
-                        id: prepared_job.compute_details.job_id.clone(),                                        
-                        owner: prepared_job.owner,
-                        status: job::Status::Running,
-                        residue: job::Residue {
-                            receipt_cid: None,
-                        },
-                        compute_type: prepared_job.compute_details.compute_type
-                    },
-                );
+                };                
             },
 
             // prove is finished
@@ -739,49 +740,52 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 if let Err(failed) = er {
                     eprintln!("[warn] Failed to run the job: `{:#?}`", failed);       
                     //@ what to to with job id?
-                    // let _job_id = failed.who;
-                    // job.status = job::Status::ExecutionFailed;
-                    //     eprintln!("[warn] Job `{}`'s execution finished with error: `{}`",
-                    //         exec_res.job_id,
-                    //         exec_res.error_message.unwrap_or_else(|| String::from("")),
-                    //     );
-
-
+                    let job = jobs.get_mut(&failed.job_id).unwrap();
+                    job.status = job::Status::ExecutionFailed(failed.err_msg);
                     continue;
                 }
-                let (job_id, blob) = er.unwrap();
-                if false == jobs.contains_key(&job_id) {
-                    eprintln!("[warn] Critical error, job `{}` data is missing.", job_id);
-                    //@ what to do here?
-                    continue;
-                }
-                let job = jobs.get_mut(&job_id).unwrap();
-                let _ = post_job_execution(&ds_client, &ds_key, job, blob).await?;
+                let res = er.unwrap();             
+                println!("[info] Prove finished for `{}`", res.job_id);   
+                let job = jobs.get_mut(&res.job_id).unwrap();
+                let residue_path = format!(
+                    "{}/.wholesum/jobs/prover/prove/{}-upload",
+                    get_home_dir()?,
+                    &job.id
+                );
+                fs::create_dir_all(residue_path.clone())?;
+                let _ = post_job_execution(
+                    &ds_client,
+                    &ds_key,
+                    job,
+                    res.blob,
+                    &residue_path
+                ).await?;
             },
 
             // join is finished
             er = join_execution_futures.select_next_some() => {
                 if let Err(failed) = er {
                     eprintln!("[warn] Failed to run the job: `{:#?}`", failed);       
-                    //@ what to to with job id?
-                    // let _job_id = failed.who;
-                    // job.status = job::Status::ExecutionFailed;
-                    //     eprintln!("[warn] Job `{}`'s execution finished with error: `{}`",
-                    //         exec_res.job_id,
-                    //         exec_res.error_message.unwrap_or_else(|| String::from("")),
-                    //     );
-
-
+                    let job = jobs.get_mut(&failed.job_id).unwrap();
+                    job.status = job::Status::ExecutionFailed(failed.err_msg);
                     continue;
                 }
-                let (job_id, blob) = er.unwrap();
-                if false == jobs.contains_key(&job_id) {
-                    eprintln!("[warn] Critical error, job `{}` data is missing.", job_id);
-                    //@ what to do here?
-                    continue;
-                }
-                let job = jobs.get_mut(&job_id).unwrap();
-                let _ = post_job_execution(&ds_client, &ds_key, job, blob).await?;                                
+                let res = er.unwrap();     
+                println!("[info] Join finished for `{}`", res.job_id);              
+                let job = jobs.get_mut(&res.job_id).unwrap();
+                let residue_path = format!(
+                    "{}/.wholesum/jobs/prover/join/{}-upload",
+                    get_home_dir()?,
+                    &job.id
+                );
+                fs::create_dir_all(residue_path.clone())?;
+                let _ = post_job_execution(
+                    &ds_client,
+                    &ds_key,
+                    job,
+                    res.blob,
+                    &residue_path
+                ).await?;                                
             },
 
             // stark_to_snark is finished
@@ -799,14 +803,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
                     continue;
                 }
-                let (job_id, blob) = er.unwrap();
-                if false == jobs.contains_key(&job_id) {
-                    eprintln!("[warn] Critical error, job `{}` data is missing.", job_id);
-                    //@ what to do here?
-                    continue;
-                }
-                let job = jobs.get_mut(&job_id).unwrap();
-                let _ = post_job_execution(&ds_client, &ds_key, job, blob).await?;                
+                let res = er.unwrap();                
+                let job = jobs.get_mut(&res.job_id).unwrap();
+                let _ = post_job_execution(&ds_client, &ds_key, job, res.blob, "").await?;                
             },
             
             // handle benchmark has been uploaded to dStorage
@@ -832,6 +831,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     }
 }
 
+pub fn get_home_dir() -> anyhow::Result<String> {
+    let err_msg = "Home dir is not available";
+    let binding = home::home_dir()
+        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
+    let home_dir = binding.to_str()
+        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
+    Ok(home_dir.to_string())
+}
+
 // prepare benchmark job details
 fn _prepare_benchmark_job()
  -> Result<(String, String, Vec<String>, String), Box<dyn Error>> {
@@ -846,7 +854,7 @@ fn _prepare_benchmark_job()
     // create directory for residue
     let residue_path = format!(
         "{}/compute/{}/residue",
-        job::get_residue_path()?,
+        get_home_dir()?,
         bench_job_id
     );
     std::fs::create_dir_all(residue_path.clone())?;
@@ -868,17 +876,16 @@ async fn prepare_job_reqs(
     compute_details: compute::ComputeDetails,
     owner: PeerId,
 ) -> anyhow::Result<PreparedJob> {
-    println!("{compute_details:?}");
     // download blob from dstorage and store it on docker volume of the job
-    let blob_location = format!(
-        "{}/compute/{}/input",
-        job::get_residue_path()?,
-        &compute_details.job_id
+    let base_location = format!(
+        "{}/.wholesum/jobs/prover",
+        get_home_dir()?
     );
-    fs::create_dir_all(blob_location.clone())?;
-    let blob_file_paths = match &compute_details.input_type {
+    let blob_file_paths = match &compute_details.input_type {        
         compute::ComputeJobInputType::Prove(cid) => {
-            let blob_file_path = format!("{blob_location}/{}", compute_details.job_id);
+            let action_dir = format!("{base_location}/prove");
+            fs::create_dir_all(action_dir.clone())?;
+            let blob_file_path = format!("{action_dir}/{}", &compute_details.job_id);
             lighthouse::download_file(
                 ds_client,
                 &cid,
@@ -888,15 +895,17 @@ async fn prepare_job_reqs(
         },
 
         compute::ComputeJobInputType::Join(left_cid, right_cid) => {
+            let action_dir = format!("{base_location}/join");
+            fs::create_dir_all(action_dir.clone())?;
             // left cid
-            let left_blob_file_path = format!("{blob_location}/{}-left", compute_details.job_id);
+            let left_blob_file_path = format!("{action_dir}/{}-left", &compute_details.job_id);
             lighthouse::download_file(
                 ds_client,
                 &left_cid,
                 left_blob_file_path.clone()
             ).await?;
             // right cid
-            let right_blob_file_path = format!("{blob_location}/{}-right", compute_details.job_id);
+            let right_blob_file_path = format!("{action_dir}/{}-right", &compute_details.job_id);
             lighthouse::download_file(
                 ds_client,
                 &right_cid,
@@ -917,15 +926,12 @@ async fn post_job_execution(
     ds_client: &reqwest::Client,
     ds_key: &str,
     job: &mut job::Job,
-    blob: Vec<u8>
+    blob: Vec<u8>,
+    residue_path: &str,
 ) -> anyhow::Result<()> {
     job.status = job::Status::ExecutionSucceeded;
     println!("[info] Execution was a success, now upload the receipt to dstorage.");    
-    let residue_path = format!(
-        "{}/compute/{}",
-        job::get_residue_path()?,
-        &job.id
-    );
+    //@ stream the blob instead of writing and reading    
     let out_file = format!("{residue_path}/out_receipt");
     let _bytes_written = std::fs::write(
         &out_file,
@@ -960,7 +966,7 @@ fn job_status_of_peer(
         if job.owner != peer_id {
             continue;
         }
-        let status = match job.status {
+        let status = match &job.status {
             job::Status::ExecutionSucceeded => {
                 if true == job.residue.receipt_cid.is_some() {
                     compute::JobStatus::ExecutionSucceeded(
@@ -971,9 +977,8 @@ fn job_status_of_peer(
                 }
             },
 
-            //@ how about sharing cid of stderr?
-            job::Status::ExecutionFailed => 
-                compute::JobStatus::ExecutionFailed(None),
+            job::Status::ExecutionFailed(err) => 
+                compute::JobStatus::ExecutionFailed(Some(err.clone())),
             
             // all the rest are trivial status
             _ => compute::JobStatus::Running,

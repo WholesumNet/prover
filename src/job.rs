@@ -1,6 +1,4 @@
 use libp2p::PeerId;
-use home;
-
 use comms::compute::ComputeType;
 use anyhow;
 
@@ -13,7 +11,7 @@ pub struct Residue {
 pub enum Status {
     Running,
     ExecutionSucceeded,     // execution finished successfully but blobs need to be uploaded
-    ExecutionFailed,
+    ExecutionFailed(String),
     HarvestReady,           // blobs are upload and the job is ready to be harvested 
 }
 
@@ -27,12 +25,3 @@ pub struct Job {
     pub compute_type: ComputeType,
 }
 
-// get base residue path of the host
-pub fn get_residue_path() -> anyhow::Result<String> {
-    let err_msg = "Home dir is not available";
-    let binding = home::home_dir()
-        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
-    let home_dir = binding.to_str()
-        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
-    Ok(format!("{home_dir}/.wholesum/jobs/prover"))
-}
