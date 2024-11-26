@@ -52,7 +52,6 @@ use uuid::Uuid;
 use anyhow;
 
 mod job;
-mod benchmark;
 mod recursion;
 
 #[derive(Debug)]
@@ -118,32 +117,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     let mut join_execution_futures = FuturesUnordered::new();
     let mut snark_execution_futures = FuturesUnordered::new();
     
-
-    // benchmark maintenance
-    let mut benchmarks = HashMap::<String, benchmark::Benchmark>::new();
-    // let mut benchmark_exec_futures = FuturesUnordered::new();
-    // {
-    //     let (bench_job_id, docker_image, bench_command, residue_path) = prepare_benchmark_job()?;
-    //     benchmark_exec_futures.push(
-    //         run_docker_job(
-    //             &docker_con,
-    //             bench_job_id.clone(),
-    //             docker_image.clone(),
-    //             bench_command.clone(),
-    //             residue_path.clone()
-    //         )
-    //     );
-    //     benchmarks.insert(bench_job_id.clone(), benchmark::Benchmark {
-    //         id: bench_job_id.clone(),
-    //         cid: None,
-    //         timestamp: None,
-    //     });
-    // }
-    let mut timer_benchmark_exec = stream::interval(
-        Duration::from_secs(24 * 60 * 60)
-    ).fuse();
-    // let mut benchmark_upload_futures = FuturesUnordered::new();
-        
     // key 
     let local_key = {
         if let Some(key_file) = cli.key_file {
@@ -232,30 +205,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .behaviour_mut()
                     .kademlia
                     .get_closest_peers(random_peer_id);
-            },
-
-            // recalulate benchmarks
-            () = timer_benchmark_exec.select_next_some() => {
-                //@ to be removed: max 1 job limit
-                // if false == benchmark_exec_futures.is_empty() {
-                //     println!("A benchmark is already being executed...");
-                //     continue;
-                // }
-                // let (bench_job_id, docker_image, bench_command, residue_path) = prepare_benchmark_job()?;
-                // benchmark_exec_futures.push(
-                //     run_docker_job(
-                //         &docker_con,
-                //         bench_job_id.clone(),
-                //         docker_image.clone(),
-                //         bench_command.clone(),
-                //         residue_path.clone()
-                //     )
-                // );
-                // benchmarks.insert(bench_job_id.clone(), benchmark::Benchmark {
-                //     id: bench_job_id.clone(),
-                //     cid: None,
-                //     timestamp: None,
-                // });
             },
 
             // mdns events
@@ -403,43 +352,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             criteria
                         }) => {
                             println!("`Need compute` request from client: `{peer_id}`");
-                            // validate available benchmarks
-                            let bench_is_valid = {
-                                if let Some(mr_bench) = benchmarks.values().last() { 
-                                    println!("Benchmark timestamp: {:?}", mr_bench.timestamp);
-                                    let utc_now = Utc::now();
-                                    let bench_timestamp = mr_bench.timestamp.unwrap_or_else(
-                                        || DateTime::from_timestamp(0, 0).unwrap()
-                                    );
-                                    mr_bench.cid.is_some() &&
-                                    utc_now.timestamp() - bench_timestamp.timestamp() < criteria.benchmark_expiry_secs.unwrap_or_else(|| 1_000_000i64) as i64
-                                } else {
-                                    println!("No benchmarks at all.");
-                                    false
-                                }
-                            };
-
-                            if false == bench_is_valid {
-                                // re-run the benchmark 
-                                println!("Benchmark is invalid, need to re-calculate it!");                                                                
-                                // continue;
-                            }
-
-                            // advanced image pull requested
-                            // if message.data.len() > 1 {
-                            //     let docker_image = String::from_utf8_lossy(&message.data[1..]).to_string();
-                            //     advanced_image_import_futures.push(
-                            //         import_docker_image(
-                            //             &docker_con,
-                            //             docker_image.clone()
-                            //         )
-                            //     );
-                            //     println!("Advanced docker image import request for `{docker_image}`");
-                            // }
-
+                                                        
                             // engage with the client through a direct p2p channel
                             // and express interest in getting the compute job done
-                            // let bench = benchmarks.values().last().unwrap();
                             //@ needed compute mathces with my skills?
                             let offer = compute::Offer {
                                 compute_type: criteria.compute_type,
@@ -449,11 +364,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     cpu_model: "core i7-5500u".to_string(),
                                 },
                                 price: 1,
-                                server_benchmark: compute::ServerBenchmark{
-                                    //@ clone?
-                                    cid: String::from(""), //bench.cid.clone().unwrap(),
-                                    pod_name: String::from("")//format!("benchmark_{}", bench.id.clone())
-                                }
                             };
                             let sw_req_id = swarm
                                 .behaviour_mut().req_resp
@@ -569,54 +479,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             println!("Offer decliend by the client: `{peer_id}`");
                         },                        
 
-                        // // jobs that do not need benchmarks are wrapped inside responses
-                        // notice::Response::ComputeJob(compute_details) => {
-                        //     println!("received `compute job` request from client: `{}`, job: `{:#?}`",
-                        //         peer_id, compute_details);                           
-                        //     // no duplicate job_ids are allowed
-                        //     if jobs.contains_key(&compute_details.job_id) {
-                        //         println!("Duplicate compute job, ignored.");
-                        //         continue;
-                        //     }                            
-
-                        //     let command = vec![
-                        //         String::from("/bin/sh"),
-                        //         String::from("-c"),
-                        //         compute_details.command
-                        //     ];
-                        //     // create directory for residue
-                        //     let residue_path = format!(
-                        //         "{}/compute/{}/residue",
-                        //         job::get_residue_path()?,
-                        //         compute_details.job_id
-                        //     );
-                        //     std::fs::create_dir_all(residue_path.clone())?;
-
-                        //     job_execution_futures.push(
-                        //         run_docker_job(
-                        //             &docker_con,
-                        //             compute_details.job_id.clone(),
-                        //             compute_details.docker_image.clone(),
-                        //             command.clone(),
-                        //             residue_path.clone()
-                        //         )
-                        //     );
-
-                        //     // keep track of running jobs
-                        //     jobs.insert(
-                        //         compute_details.job_id.clone(),
-                        //         job::Job {
-                        //             id: compute_details.job_id.clone(),                                        
-                        //             owner: peer_id,
-                        //             status: job::Status::DockerWarmingUp,
-                        //             residue: job::Residue {
-                        //                 fd12_cid: None,
-                        //                 receipt_cid: None,
-                        //             },
-                        //         },
-                        //     );
-                        // },
-
                         _ => (),
                     }
                 },
@@ -625,62 +487,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     // println!("{:#?}", event)
                 },
 
-            },
-
-            // docker image import result is ready
-            // image_import_result = advanced_image_import_futures.select_next_some() => {
-            //     if let Err(err) = image_import_result {
-            //         eprintln!("Advanced image import failed: `{err:#?}`");
-            //         //@ what to do with err.who(image name)?
-            //         continue;
-            //     }
-            //     let _image = image_import_result.unwrap();
-            // },
-
-            // benchmark execution is finished
-            // job_exec_res = benchmark_exec_futures.select_next_some() => {
-                // if let Err(failed) = job_exec_res {
-                //     eprintln!("Failed to run the benchmark job: `{:#?}`", failed);       
-                //     continue;
-                // }
-                // let result = job_exec_res.unwrap();
-                // if false == benchmarks.contains_key(&result.job_id) {
-                //     println!("Critical error: benchmark job `{}` is missing.", result.job_id);
-                //     //@ what to do here?
-                //     continue;
-                // }
-                // let bench = benchmarks.get_mut(&result.job_id).unwrap();
-                // if result.exit_status_code != 0 { 
-                //     // job.status = job::Status::ExecutionFailed;
-                //     println!("Benchmark job `{}`'s execution finished with error: `{}`",
-                //         result.job_id,
-                //         result.error_message.unwrap_or_else(|| String::from("")),
-                //     );
-                //     continue;                 
-                // } 
-                // // job.status = job::Status::ExecutionSucceeded;
-                // //@ beware of the time difference between now and the actual timestamp
-                // bench.timestamp = Some(Utc::now());
-                // println!("Benchmark execution was a success.");
-
-                // a benchmark job has outputs a binary json blob to '~/residue/benchmark'
-                
-                // //@ if err, then program exits, must be handled properly
-                // let residue_path = format!(
-                //     "{}/compute/{}/residue",
-                //     job::get_residue_path()?,
-                //     result.job_id
-                // );
-                // // persist and share benchmark                              
-                // benchmark_upload_futures.push(
-                //     persist_benchmark(
-                //         &ds_client,
-                //         &ds_key,
-                //         format!("{residue_path}/benchmark", ),
-                //         result.job_id.clone(),
-                //     )
-                // );
-            // },
+            },            
 
             // job is ready to start execution
             prep_res = prepare_job_reqs_futures.select_next_some() => {
@@ -806,27 +613,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 let res = er.unwrap();                
                 let job = jobs.get_mut(&res.job_id).unwrap();
                 let _ = post_job_execution(&ds_client, &ds_key, job, res.blob, "").await?;                
-            },
-            
-            // handle benchmark has been uploaded to dStorage
-            // bench_upload_result = benchmark_upload_futures.select_next_some() => {
-            //     let upload_result: ResidueUploadResult = match bench_upload_result {
-            //         Ok(ur) => ur,
-            //         Err(e) => {
-            //             println!("Missing cid for the benchmark pod: `{e:?}`");
-            //             //@ what to do here
-            //             continue
-            //         }
-            //     };
-            //     println!("Benchmakr pod is now public: {:#?}", upload_result);
-            //     if false == benchmarks.contains_key(&upload_result.job_id) {
-            //         println!("Residue pod's benchmark job data is missing.");
-            //         //@ what to do here?
-            //         continue;
-            //     }
-            //     let bench = benchmarks.get_mut(&upload_result.job_id).unwrap();
-            //     bench.cid = Some(upload_result.cid); 
-            // },
+            },                       
         }
     }
 }
@@ -838,29 +625,6 @@ pub fn get_home_dir() -> anyhow::Result<String> {
     let home_dir = binding.to_str()
         .ok_or_else(|| anyhow::Error::msg(err_msg))?;
     Ok(home_dir.to_string())
-}
-
-// prepare benchmark job details
-fn _prepare_benchmark_job()
- -> Result<(String, String, Vec<String>, String), Box<dyn Error>> {
-
-    let bench_job_id = Uuid::new_v4().simple().to_string()[..7].to_string();
-    let docker_image = String::from("rezahsnz/ntt512-benchmark:0.21");
-    let bench_command = vec![
-        String::from("/bin/sh"),
-        String::from("-c"),
-        String::from("/home/prince/ntt512")
-    ];
-    // create directory for residue
-    let residue_path = format!(
-        "{}/compute/{}/residue",
-        get_home_dir()?,
-        bench_job_id
-    );
-    std::fs::create_dir_all(residue_path.clone())?;
-    Ok(
-        (bench_job_id, docker_image, bench_command, residue_path)
-    )
 }
 
 #[derive(Debug, Clone)]
@@ -1076,26 +840,4 @@ async fn _persist_receipt(
     )
 }
 
-async fn _persist_benchmark(
-    ds_client: &reqwest::Client,
-    ds_key: &str,
-    local_benchmark_path: String,
-    job_id: String,
-) -> anyhow::Result<ResidueUploadResult>  {
-    
-    // upload receipt
-    let upload_res = lighthouse::upload_file(
-        ds_client,
-        ds_key,
-        local_benchmark_path, 
-        format!("benchmark-{job_id}")
-    ).await?;
-    
-    Ok(
-        ResidueUploadResult {
-            job_id: job_id,
-            cid: upload_res.cid
-        }
-    )
-}
 
