@@ -701,6 +701,7 @@ async fn post_job_execution(
         &out_file,
         blob
     );
+    // @wtd if it fails?
     // upload the receipt
     let upload_res = lighthouse::upload_file(
         &ds_client,

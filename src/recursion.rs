@@ -38,7 +38,8 @@ pub async fn prove_and_lift(
     job_id: String,
     seg_path: PathBuf
 ) -> Result<ExecutionResult, ExecutionError> {
-    println!("[info] Proving segment `{}`...", job_id);    
+    println!("[info] Proving segment `{}`...", job_id);
+    let now = Instant::now();      
     ApiClient::from_env()
     .and_then(|r0_client|    
         r0_client
@@ -73,6 +74,8 @@ pub async fn prove_and_lift(
                     let asset: Asset = verified_lift_receipt.try_into()?;
                     asset.as_bytes()?.into()
                 };
+                let prove_dur = now.elapsed().as_secs();
+                println!("prove took `{prove_dur} secs`.");  
                 Ok(ExecutionResult {
                     job_id: job_id.clone(),
                     blob: blob
@@ -92,6 +95,7 @@ pub async fn join(
     right_sr_path: PathBuf,
 ) -> Result<ExecutionResult, ExecutionError> {
     println!("[info] Joining receipts: `{}`...", job_id);
+    let now = Instant::now();     
     ApiClient::from_env()
     .and_then(|r0_client|
         r0_client
@@ -107,6 +111,8 @@ pub async fn join(
             let asset: Asset = join_receipt.try_into()?;
                 asset.as_bytes()?.into()
             };
+            let join_dur = now.elapsed().as_secs();
+            println!("[info] Join took `{join_dur} secs`.");  
             Ok(ExecutionResult {
                 job_id: job_id.clone(),
                 blob: blob
