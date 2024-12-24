@@ -20,19 +20,19 @@ use std::{
 };
 
 use bincode;
-use chrono::{DateTime, Utc};
+// use chrono::{DateTime, Utc};
 
-use bollard::Docker;
-use jocker::exec::{
-    import_docker_image,
-    run_docker_job,
-};
+// use bollard::Docker;
+// use jocker::exec::{
+//     import_docker_image,
+//     run_docker_job,
+// };
 
 use clap::Parser;
 use reqwest;
 
 use libp2p::{
-    gossipsub, mdns, request_response,
+    gossipsub, mdns,
     identity, identify, kad,  
     swarm::{SwarmEvent},
     PeerId,
@@ -47,18 +47,14 @@ use comms::{
     notice, compute,
 };
 use dstorage::lighthouse;
-
-use uuid::Uuid;
+// use uuid::Uuid;
 use anyhow;
+use bit_vec::BitVec;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 
 mod job;
 mod recursion;
-
-#[derive(Debug)]
-struct ResidueUploadResult {
-    job_id: String,
-    cid: String,
-}
 
 // CLI
 #[derive(Parser, Debug)]
@@ -85,7 +81,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
-    
     let cli = Cli::parse();
     println!("<-> `Prover` agent for Wholesum network <->");
     println!("Operating mode: `{}` network",
@@ -102,20 +97,23 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
         .build()?;
 
-    println!("Connecting to docker daemon...");
-    let docker_con = Docker::connect_with_socket_defaults()?;
+    // println!("Connecting to docker daemon...");
+    // let docker_con = Docker::connect_with_socket_defaults()?;
     // docker_con.ping()?.map_ok(|_| Ok::<_, ()>(println!("Connection succeeded.")));
 
     // let's maintain a list of jobs
     let mut jobs = HashMap::<String, job::Job>::new();
-    // pull till job requirements are met, ie cids are downloaded
-    let mut prepare_job_reqs_futures = FuturesUnordered::new();
-    // pull till cids are download
-    // let mut blob_download_futures = FuturesUnordered::new();
+    // cids' download futures
+    let mut prepare_prove_job_futures = FuturesUnordered::new();
+    // let mut prepare_join_job_futures = FuturesUnordered::new();
+    // let mut prepare_groth16_job_futures = FuturesUnordered::new();
+
     // pull jobs' execution
     let mut prove_execution_futures = FuturesUnordered::new();
-    let mut join_execution_futures = FuturesUnordered::new();
-    let mut snark_execution_futures = FuturesUnordered::new();
+    // let mut join_execution_futures = FuturesUnordered::new();
+    // let mut groth16_execution_futures = FuturesUnordered::new();
+
+    let mut proof_upload_futures = FuturesUnordered::new();
     
     // key 
     let local_key = {
@@ -146,12 +144,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     if false == cli.dev {
         // get to know bootnodes
         const BOOTNODES: [&str; 1] = [
-            "12D3KooWLVDsEUT8YKMbZf3zTihL3iBGoSyZnewWgpdv9B7if7Sn",
+            "TBD",
         ];
         for peer in &BOOTNODES {
             swarm.behaviour_mut()
                 .kademlia
-                .add_address(&peer.parse()?, "/ip4/80.209.226.9/tcp/20201".parse()?);
+                .add_address(&peer.parse()?, "/ip4/W.X.Y.Z/tcp/20201".parse()?);
         }
         // find myself
         if let Err(e) = 
@@ -159,19 +157,16 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 .behaviour_mut()
                 .kademlia
                 .bootstrap() {
-            eprintln!("bootstrap failed to initiate: `{:?}`", e);
+            eprintln!("[warn] Failed to bootstrap Kademlia: `{:?}`", e);
 
         } else {
-            println!("self-bootstrap is initiated.");
+            println!("[info] Self-bootstraping is initiated.");
         }
     }
 
     // if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
     //     eprintln!("failed to initiate bootstrapping: {:#?}", e);
     // }
-
-    // read full lines from stdin
-    // let mut input = io::BufReader::new(io::stdin()).lines().fuse();
 
     // listen on all interfaces and whatever port the os assigns
     //@ should read from the config file
@@ -181,19 +176,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     swarm.listen_on("/ip6/::/udp/20202/quic-v1".parse()?)?;
 
     let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
-
-
+    let mut rng = thread_rng();
     // oh shit here we go again
     loop {
         select! {
-            // line = input.select_next_some() => {
-            //   if let Err(e) = swarm
-            //     .behaviour_mut().gossipsub
-            //     .publish(topic.clone(), line.expect("Stdin not to close").as_bytes()) {
-            //       println!("Publish error: {e:?}")
-            //     }
-            // },
-
             // try to discover new peers
             () = timer_peer_discovery.select_next_some() => {
                 if true == cli.dev {
@@ -210,22 +196,13 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // mdns events
             event = swarm.select_next_some() => match event {
                 SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Local node is listening on {address}");
+                    println!("[info] Local node is listening on {address}");
                 },
-
-                SwarmEvent::IncomingConnection { .. } => {
-                },
-
-                SwarmEvent::IncomingConnectionError { .. } => {
-                },
-
-                SwarmEvent::OutgoingConnectionError { .. } => {
-                }
 
                 // mdns events
                 SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered a new peer: {peer_id}");
+                        println!("[info] mDNS discovered a new peer: {peer_id}");
                         swarm
                             .behaviour_mut()
                             .gossipsub
@@ -235,7 +212,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
                 SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                     for (peer_id, _multiaddr) in list {
-                        println!("mDNS discovered peer has expired: {peer_id}");
+                        println!("[info] mDNS discovered peer has expired: {peer_id}");
                         swarm
                             .behaviour_mut()
                             .gossipsub
@@ -249,7 +226,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     info,
                     ..
                 })) => {
-                    println!("Inbound identify event `{:#?}`", info);
+                    println!("[info] Inbound identify event `{:#?}`", info);
                     if false == cli.dev {
                         for addr in info.listen_addrs {
                             // if false == addr.iter().any(|item| item == &"127.0.0.1" || item == &"::1"){
@@ -334,286 +311,278 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 //     eprintln!("unroutable peer: {:?}", peer_id);
                 // },
 
-                // gossipsub events
+                
                 SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source: peer_id,
                     message,
                     ..
                 })) => {
-                    // let msg_str = String::from_utf8_lossy(&message.data);
-                    // println!("Got message: '{}' with id: {id} from peer: {peer_id}",
-                    //          msg_str);
-                    // println!("received gossip message: {:#?}", message);
-                    // first byte is message identifier
-                    let need = bincode::deserialize(&message.data).unwrap();
-                    // let notice_req = notice::Notice::try_from(message.data[0])?;
-                    match need {
-                        notice::Notice::Compute(compute::NeedCompute {
-                            criteria
-                        }) => {
-                            println!("`Need compute` request from client: `{peer_id}`");
-                                                        
-                            // engage with the client through a direct p2p channel
-                            // and express interest in getting the compute job done
-                            //@ needed compute mathces with my skills?
-                            let offer = compute::Offer {
-                                compute_type: criteria.compute_type,
-                                hw_specs: compute::ServerSpecs {
-                                    gflops: 100,
-                                    memory_capacity: 16,
-                                    cpu_model: "core i7-5500u".to_string(),
+                    let notice = match bincode::deserialize(&message.data) {
+                        Ok(new_notice) => new_notice,
+                        Err(e) => {
+                            eprintln!("[warn] Gossip message decode error: `{e:?}`");
+                            continue;
+                        },
+                    };
+                    match notice {
+                        notice::Notice::Compute(need_compute) => {
+                            match need_compute.compute_type {
+                                compute::ComputeType::ProveAndLift(prove_details) => {
+                                    println!("[info] New prove job from `{peer_id}`: `{prove_details:?}`");
+                                    let mut proved_map = BitVec::from_bytes(&prove_details.proved_map);
+                                    proved_map.truncate(prove_details.num_segments.try_into().unwrap());
+                                    let mut unproved_segments = vec![];
+                                    for (segment_id, is_proved) in proved_map.iter().enumerate() {
+                                        if false == is_proved &&
+                                           false == jobs.contains_key(
+                                               &format!("{}-{}", need_compute.job_id, segment_id)
+                                           ) //@ slow af, optimize it
+                                        {
+                                            unproved_segments.push(segment_id);
+                                        }
+                                    }
+                                    if unproved_segments.len() == 0 {
+                                        println!("[warn] No unproved segments to choose from.");
+                                        continue;
+                                    }
+                                    let chosen_segment = *unproved_segments.choose(&mut rng).unwrap() as u32;
+                                    prepare_prove_job_futures.push(
+                                        prepare_prove_job(
+                                            &ds_client,
+                                            need_compute.job_id.clone(),                                                
+                                            chosen_segment,
+                                            format!(
+                                                "{}/{}{}",
+                                                prove_details.segments_base_cid,
+                                                prove_details.segment_prefix_str,
+                                                chosen_segment
+                                            ),
+                                            peer_id
+                                        )
+                                    );       
+
                                 },
-                                price: 1,
-                            };
-                            let sw_req_id = swarm
-                                .behaviour_mut().req_resp
-                                .send_request(
-                                    &peer_id,
-                                    notice::Request::ComputeOffer(offer),
-                                );
-                            println!("compute offer was sent to client, id: {sw_req_id}");
+    
+                                compute::ComputeType::Join(join_details) => {
+                                },
+
+                                compute::ComputeType::Groth16(groth16_details) => {
+
+                                },
+
+                                _ => {},
+                                
+                            }
                         },
 
                         // status update inquiry
-                        notice::Notice::StatusUpdate(_) => {
-                            println!("`job-status` request from client: `{}`", peer_id);
-                            let updates = job_status_of_peer(
-                                &jobs,
-                                peer_id
-                            ); 
+                        notice::Notice::UpdateMe(_) => {
+                            let mut updates = Vec::<compute::JobUpdate>::new();
+                            for job in jobs.values() {
+                                if job.owner != peer_id {
+                                    continue;
+                                }
+                                let status = match &job.status {
+                                    job::Status::ExecutionSucceeded(proof_cid) =>
+                                        compute::JobStatus::ExecutionSucceeded(proof_cid.clone()),
+
+                                    job::Status::ExecutionFailed(err) => 
+                                        compute::JobStatus::ExecutionFailed(Some(err.clone())),
+                                    
+                                    // all the rest are trivial status
+                                    _ => compute::JobStatus::Running,
+                                };
+                                updates.push(compute::JobUpdate {
+                                    id: job.id.clone(),
+                                    status: status,
+                                    item: match &job.job_type {
+                                        job::JobType::Prove(segment_id) => 
+                                            compute::Item::Prove(*segment_id),
+
+                                        job::JobType::Join(left_proof_cid, right_proof_cid) =>
+                                            compute::Item::Join(left_proof_cid.clone(), right_proof_cid.clone()),
+
+                                        job::JobType::Snark => 
+                                            compute::Item::Snark,
+                                    },
+                                });
+                            }                            
                             if updates.len() > 0 {
                                 let _ = swarm
                                     .behaviour_mut().req_resp
                                     .send_request(
                                         &peer_id,
-                                        notice::Request::UpdateForJobs(updates),
+                                        notice::Request::Update(updates),
                                     );
-                                // println!("jobs' status was sent to the client. req_id: `{_sw_resp_id}`");                            
                             }
                         },
-
-                        // notice::Notice::Harvest(_) => {
-                        //     let updates = harvest_jobs_of_peer(
-                        //         &jobs,
-                        //         peer_id
-                        //     );                            
-                        //     if updates.len() > 0 {
-                        //         let _sw_req_id = swarm
-                        //             .behaviour_mut().req_resp
-                        //             .send_request(
-                        //                 &peer_id,
-                        //                 notice::Request::UpdateForJobs(updates),
-                        //             );
-                        //     }
-                        // },
-
-                        _ => (),
                     };
-                },
-
-                // process responses
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
-                    peer: peer_id,
-                    message: request_response::Message::Request {
-                        request,
-                        channel,
-                        ..
-                    }
-                })) => {                    
-                    match request {
-                        // notice::Response::DeclinedOffer => {
-                        //     println!("Offer decliend by the client: `{peer_id}`");
-                        // },                        
-                        notice::Request::ComputeJob(compute_details) => {
-                            println!("[info] New job from client: `{}`: `{:#?}`",
-                                peer_id, compute_details
-                            );
-                            // no duplicate job_ids are allowed
-                            if jobs.contains_key(&compute_details.job_id) {
-                                println!("[warn] Duplicate compute job, ignored.");
-                                continue;
-                            }
-                            prepare_job_reqs_futures.push(
-                                prepare_job_reqs(
-                                    &ds_client,
-                                    compute_details,
-                                    peer_id
-                                )
-                            );                            
-                        },
-
-                        // job status inquiry
-                        // notice::Request::JobStatus(_to_be_updated) => {
-                        //     // servers are lazy with job updates so clients need to query for their job's status every so often
-                        //     println!("`job-status` request from client: `{}`", peer_id);
-                        //     let updates = job_status_of_peer(
-                        //         &jobs,
-                        //         peer_id
-                        //     ); 
-                        //     if updates.len() > 0 {
-                        //         let _ = swarm
-                        //             .behaviour_mut().req_resp
-                        //             .send_response(
-                        //                 // &peer_id,
-                        //                 channel,
-                        //                 notice::Response::UpdateForJobs(updates),
-                        //             );
-                        //         // println!("jobs' status was sent to the client. req_id: `{_sw_resp_id}`");                            
-                        //     }
-                        // },
-
-                        _ => (),
-                    }
-                },
-
-                // responses
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message{
-                    peer: peer_id,
-                    message: request_response::Message::Response {
-                        response,
-                        ..
-                    }
-                })) => {                    
-                    match response {
-                        notice::Response::DeclinedOffer => {
-                            println!("Offer decliend by the client: `{peer_id}`");
-                        },                        
-
-                        _ => (),
-                    }
                 },
 
                 _ => {
                     // println!("{:#?}", event)
                 },
-
             },            
 
-            // job is ready to start execution
-            prep_res = prepare_job_reqs_futures.select_next_some() => {
+            // prove job is ready to start
+            prep_res = prepare_prove_job_futures.select_next_some() => {
                 if let Err(failed) = prep_res {
-                    eprintln!("[warn] Failed to prepare job requirements: {:#?}", failed);
+                    eprintln!("[warn] Failed to prepare prove job: `{:#?}`", failed);
                     //@ wtd here?
                     continue;
                 }
-                let prepared_job = prep_res.unwrap();
+                let prepared_prove_job: PreparedProveJob = prep_res.unwrap();
+                let prove_id = format!(
+                    "{}-{}",
+                    prepared_prove_job.job_id,
+                    prepared_prove_job.segment_id
+                );
                 // keep track of running jobs
                 jobs.insert(
-                    prepared_job.compute_details.job_id.clone(),
+                    prove_id.clone(),
                     job::Job {
-                        id: prepared_job.compute_details.job_id.clone(),                                        
-                        owner: prepared_job.owner,
+                        id: prepared_prove_job.job_id,                                        
+                        owner: prepared_prove_job.owner,
                         status: job::Status::Running,
-                        residue: job::Residue {
-                            receipt_cid: None,
-                        },
-                        compute_type: prepared_job.compute_details.compute_type.clone()
+                        proof_file_path: None,
+                        job_type: job::JobType::Prove(prepared_prove_job.segment_id),
                     },
                 );
                 // run it
-                match prepared_job.compute_details.compute_type {
-                    compute::ComputeType::ProveAndLift => {
-                        prove_execution_futures.push(
-                            recursion::prove_and_lift(
-                                prepared_job.compute_details.job_id.clone(),
-                                prepared_job.inputs[0].clone().into()
-                            )
-                        );
-                    },
-
-                    compute::ComputeType::Join => {
-                        join_execution_futures.push(
-                            recursion::join(
-                                prepared_job.compute_details.job_id.clone(),
-                                prepared_job.inputs[0].clone().into(),
-                                prepared_job.inputs[1].clone().into()
-                            )
-                        );
-                    },
-
-                    compute::ComputeType::Snark => {
-                        snark_execution_futures.push(
-                            recursion::stark_to_snark(
-                                prepared_job.compute_details.job_id.clone(),
-                                prepared_job.inputs[0].clone().into()
-                            )
-                        );
-                    },
-                };                
+                prove_execution_futures.push(
+                    recursion::prove_and_lift(
+                        prove_id.clone(),
+                        prepared_prove_job.segment_file_path.into()
+                    )
+                );             
             },
 
-            // prove is finished
+            // prove job is finished
             er = prove_execution_futures.select_next_some() => {                
                 if let Err(failed) = er {
-                    eprintln!("[warn] Failed to run the job: `{:#?}`", failed);       
-                    //@ what to to with job id?
+                    eprintln!("[warn] Failed to run the prove job: `{:#?}`", failed);       
+                    //@ wtd with job?
                     let job = jobs.get_mut(&failed.job_id).unwrap();
                     job.status = job::Status::ExecutionFailed(failed.err_msg);
                     continue;
                 }
-                let res = er.unwrap();             
-                println!("[info] Prove finished for `{}`", res.job_id);   
-                let job = jobs.get_mut(&res.job_id).unwrap();
-                let residue_path = format!(
-                    "{}/.wholesum/jobs/prover/prove/{}-upload",
-                    get_home_dir()?,
-                    &job.id
+                let res = er.unwrap();
+                let prove_id = res.job_id;             
+                println!("[info] Prove finished for `{}`, let's upload it.", prove_id);
+                proof_upload_futures.push(
+                    upload_proof(
+                        &ds_client,
+                        &ds_key,
+                        format!(
+                            "{}/.wholesum/jobs/prover/{}",
+                            get_home_dir()?,
+                            prove_id
+                        ),
+                        prove_id.clone(),
+                        res.blob,
+                    )
                 );
-                fs::create_dir_all(residue_path.clone())?;
-                let _ = post_job_execution(
-                    &ds_client,
-                    &ds_key,
-                    job,
-                    res.blob,
-                    &residue_path
-                ).await?;
             },
 
-            // join is finished
-            er = join_execution_futures.select_next_some() => {
-                if let Err(failed) = er {
-                    eprintln!("[warn] Failed to run the job: `{:#?}`", failed);       
-                    let job = jobs.get_mut(&failed.job_id).unwrap();
-                    job.status = job::Status::ExecutionFailed(failed.err_msg);
-                    continue;
-                }
-                let res = er.unwrap();     
-                println!("[info] Join finished for `{}`", res.job_id);              
-                let job = jobs.get_mut(&res.job_id).unwrap();
-                let residue_path = format!(
-                    "{}/.wholesum/jobs/prover/join/{}-upload",
-                    get_home_dir()?,
-                    &job.id
-                );
-                fs::create_dir_all(residue_path.clone())?;
-                let _ = post_job_execution(
-                    &ds_client,
-                    &ds_key,
-                    job,
-                    res.blob,
-                    &residue_path
-                ).await?;                                
+            // join job is ready to start
+            // prep_res = prepare_join_job_futures.select_next_some() => {
+            //     if let Err(failed) = prep_res {
+            //         eprintln!("[warn] Failed to prepare join job: `{:#?}`", failed);
+            //         //@ wtd here?
+            //         continue;
+            //     }
+            //     let prepared_join_job: PreparedJoinJob = prep_res.unwrap();
+            //     // keep track of running jobs
+            //     jobs.insert(
+            //         prepared_join_job.join_id.clone(),
+            //         job::Job {
+            //             id: prepared_join_job.job_id,                                        
+            //             owner: prepared_join_job.owner,
+            //             status: job::Status::Running,
+            //             residue: job::Residue {
+            //                 receipt_cid: None,
+            //             },
+            //             job_type: job::JobType::Join(
+            //                 prepared_join_job.left_proof_cid,
+            //                 prepared_join_job.right_proof_cid
+            //             ),
+            //         }
+            //     );
+            //     // run it
+            //     join_execution_futures.push(
+            //         recursion::join(
+            //             prepared_join_job.join_id.clone(),
+            //             prepared_join_job.left_proof_file_path.into(),
+            //             prepared_join_job.right_proof_file_path.into()
+            //         )
+            //     );             
+            // },
+
+            // join job is finished
+            // er = join_execution_futures.select_next_some() => {
+            //     if let Err(failed) = er {
+            //         eprintln!("[warn] Failed to run the join job: `{:#?}`", failed);       
+            //         let job = jobs.get_mut(&failed.job_id).unwrap();
+            //         job.status = job::Status::ExecutionFailed(failed.err_msg);
+            //         continue;
+            //     }
+            //     let res = er.unwrap();     
+            //     println!("[info] Join finished for `{}`", res.job_id);              
+            //     let job = jobs.get_mut(&res.job_id).unwrap();
+            //     let residue_path = format!(
+            //         "{}/.wholesum/jobs/prover/join/{}-upload",
+            //         get_home_dir()?,
+            //         &job.id
+            //     );
+            //     fs::create_dir_all(residue_path.clone())?;
+            //     let _ = post_job_execution(
+            //         &ds_client,
+            //         &ds_key,
+            //         job,
+            //         res.blob,
+            //         &residue_path
+            //     ).await?;                                
+            // },
+
+            // groth16 job is finished
+            // er = groth16_execution_futures.select_next_some() => {
+            //     if let Err(failed) = er {
+            //         eprintln!("[warn] Failed to run the groth16 job: `{:#?}`", failed);       
+            //         //@ what to to with job id?
+            //         // let _job_id = failed.who;
+            //         // job.status = job::Status::ExecutionFailed;
+            //         //     eprintln!("[warn] Job `{}`'s execution finished with error: `{}`",
+            //         //         exec_res.job_id,
+            //         //         exec_res.error_message.unwrap_or_else(|| String::from("")),
+            //         //     );
+
+
+            //         continue;
+            //     }                                
+            // },
+
+            // proof upload is ready
+            upload_res = proof_upload_futures.select_next_some() => {
+                match upload_res {
+                    Err(failure) => {
+                        eprintln!(
+                            "[warn] Proof upload failed for `{}`: `{:#?}`",
+                            failure.job_id,
+                            failure.err_msg
+                        );
+                        let job = jobs.get_mut(&failure.job_id).unwrap();
+                        job.status = job::Status::ExecutionFailed(failure.err_msg);
+
+                    },
+
+                    Ok(uploaded)=> {
+                        let job = jobs.get_mut(&uploaded.job_id).unwrap();
+                        job.proof_file_path = Some(uploaded.proof_file_path);
+                        job.status = job::Status::ExecutionSucceeded(uploaded.proof_cid);
+                    },
+
+                };
             },
-
-            // stark_to_snark is finished
-            er = snark_execution_futures.select_next_some() => {
-                if let Err(failed) = er {
-                    eprintln!("[warn] Failed to run the job: `{:#?}`", failed);       
-                    //@ what to to with job id?
-                    // let _job_id = failed.who;
-                    // job.status = job::Status::ExecutionFailed;
-                    //     eprintln!("[warn] Job `{}`'s execution finished with error: `{}`",
-                    //         exec_res.job_id,
-                    //         exec_res.error_message.unwrap_or_else(|| String::from("")),
-                    //     );
-
-
-                    continue;
-                }
-                let res = er.unwrap();                
-                let job = jobs.get_mut(&res.job_id).unwrap();
-                let _ = post_job_execution(&ds_client, &ds_key, job, res.blob, "").await?;                
-            },                       
         }
     }
 }
@@ -628,217 +597,156 @@ pub fn get_home_dir() -> anyhow::Result<String> {
 }
 
 #[derive(Debug, Clone)]
-struct PreparedJob {
-    pub compute_details: compute::ComputeDetails,
+struct PreparedProveJob {
+    
+    // client specified id
+    job_id: String,
+
+    segment_id: u32,
+    
     owner: PeerId,
-    inputs: Vec<String>,
+    
+    segment_file_path: String,
 }
 
-// set job up for execution
-async fn prepare_job_reqs(
+// set up prove job for execution:
+//   - download segment and save it to job's folder
+async fn prepare_prove_job(
     ds_client: &reqwest::Client,
-    compute_details: compute::ComputeDetails,
+    job_id: String,
+    segment_id: u32,
+    segment_cid: String,
     owner: PeerId,
-) -> anyhow::Result<PreparedJob> {
-    // download blob from dstorage and store it on docker volume of the job
-    let base_location = format!(
-        "{}/.wholesum/jobs/prover",
-        get_home_dir()?
+) -> anyhow::Result<PreparedProveJob> {
+    let prove_dir = format!(
+        "{}/.wholesum/jobs/prover/{}-{}",
+        get_home_dir()?,
+        job_id,
+        segment_id
     );
-    let blob_file_paths = match &compute_details.input_type {        
-        compute::ComputeJobInputType::Prove(cid) => {
-            let action_dir = format!("{base_location}/prove");
-            fs::create_dir_all(action_dir.clone())?;
-            let blob_file_path = format!("{action_dir}/{}", &compute_details.job_id);
-            lighthouse::download_file(
-                ds_client,
-                &cid,
-                blob_file_path.clone()
-            ).await?;
-            vec![blob_file_path]
-        },
-
-        compute::ComputeJobInputType::Join(left_cid, right_cid) => {
-            let action_dir = format!("{base_location}/join");
-            fs::create_dir_all(action_dir.clone())?;
-            // left cid
-            let left_blob_file_path = format!("{action_dir}/{}-left", &compute_details.job_id);
-            lighthouse::download_file(
-                ds_client,
-                &left_cid,
-                left_blob_file_path.clone()
-            ).await?;
-            // right cid
-            let right_blob_file_path = format!("{action_dir}/{}-right", &compute_details.job_id);
-            lighthouse::download_file(
-                ds_client,
-                &right_cid,
-                right_blob_file_path.clone()
-            ).await?;
-            vec![left_blob_file_path, right_blob_file_path]
-        }
-    };
+    fs::create_dir_all(prove_dir.clone())?;
+    let segment_file_path = format!("{prove_dir}/segment-{segment_id}");
+    lighthouse::download_file(
+        ds_client,
+        &segment_cid,
+        segment_file_path.clone()
+    ).await?;
     
-    Ok(PreparedJob{
-        compute_details: compute_details,
+    Ok(PreparedProveJob {
+        job_id: job_id.clone(),
+        segment_id: segment_id,
         owner: owner,
-        inputs: blob_file_paths
+        segment_file_path: segment_file_path
     })
 }
 
-async fn post_job_execution(
+#[derive(Debug, Clone)]
+struct PreparedJoinJob {
+    
+    job_id: String,
+    
+    // "job_id-left_cid-right_cid"
+    join_id: String,
+    
+    owner: PeerId,
+    
+    left_proof_cid: String,
+    left_proof_file_path: String,
+
+    right_proof_cid: String,
+    right_proof_file_path: String,
+}
+
+// set up join job for execution:
+//   - download left and right proofs(succinct) and save them to the join folder of the job
+async fn prepare_join_job(
+    ds_client: &reqwest::Client,
+    job_id: String,
+    left_proof_cid: String,
+    right_proof_cid: String,
+    owner: PeerId,
+) -> anyhow::Result<PreparedJoinJob> {
+    let join_dir = format!(
+        "{}/.wholesum/jobs/prover/{}/join",
+        get_home_dir()?,
+        job_id
+    );
+    fs::create_dir_all(join_dir.clone())?;
+    let left_proof_file_path = format!("{join_dir}/{left_proof_cid}-left");
+    lighthouse::download_file(
+        ds_client,
+        &left_proof_cid,
+        left_proof_file_path.clone()
+    ).await?;
+    let right_proof_file_path = format!("{join_dir}/{right_proof_cid}-right");
+    lighthouse::download_file(
+        ds_client,
+        &right_proof_cid,
+        right_proof_file_path.clone()
+    ).await?;
+    
+    Ok(PreparedJoinJob {
+        job_id: job_id.clone(),
+        join_id: format!("{job_id}-{left_proof_cid}-{right_proof_cid}"),
+        owner: owner,
+        left_proof_cid: left_proof_cid,
+        left_proof_file_path: left_proof_file_path,
+        right_proof_cid: right_proof_cid,
+        right_proof_file_path: right_proof_file_path
+    })
+}
+
+#[derive(Debug, Clone)]
+struct UploadProof {
+
+    job_id: String,
+
+    proof_file_path: String,
+
+    proof_cid: String,
+    
+}
+
+#[derive(Debug, Clone)]
+pub struct UploadProofFailure {
+    pub job_id: String,
+
+    pub err_msg: String,
+}
+
+async fn upload_proof(
     ds_client: &reqwest::Client,
     ds_key: &str,
-    job: &mut job::Job,
-    blob: Vec<u8>,
-    residue_path: &str,
-) -> anyhow::Result<()> {
-    job.status = job::Status::ExecutionSucceeded;
-    println!("[info] Execution was a success, now upload the receipt to dstorage.");    
-    //@ stream the blob instead of writing and reading    
-    let out_file = format!("{residue_path}/out_receipt");
-    let _bytes_written = std::fs::write(
-        &out_file,
-        blob
-    );
-    // @wtd if it fails?
-    // upload the receipt
-    let upload_res = lighthouse::upload_file(
+    residue_dir: String,
+    job_id: String,
+    proof_blob: Vec<u8>,
+) -> anyhow::Result<UploadProof, UploadProofFailure> {
+    // save to disk
+    let proof_file_path = format!("{residue_dir}/proof");
+    let _bytes_written = fs::write(
+        &proof_file_path,
+        proof_blob
+    )
+    .map_err(|e| UploadProofFailure {
+        job_id: job_id.clone(),
+        err_msg: e.to_string()
+    })?; 
+    // upload
+    lighthouse::upload_file(
         &ds_client,
         &ds_key,
-        out_file,
-        format!("receipt-{}", &job.id)
-    ).await;
-    if let Err(failed) = upload_res {
-        eprintln!("[warn] Receipt upload for `{}` failed: `{:#?}`",
-            &job.id, failed
-        );
-        //@ remember to retry for successfully finished jobs
-        return Err(failed);
-    }
-    let cid = upload_res.unwrap().cid;
-    job.residue.receipt_cid = Some(cid);
-    Ok(())
-}
-
-// retrieve all status of jobs owned by the peer_id
-fn job_status_of_peer(
-    jobs: &HashMap::<String, job::Job>,
-    peer_id: PeerId
-) -> Vec<compute::JobUpdate> {
-    let mut updates = Vec::<compute::JobUpdate>::new();
-    for job in jobs.values() {
-        if job.owner != peer_id {
-            continue;
-        }
-        let status = match &job.status {
-            job::Status::ExecutionSucceeded => {
-                if true == job.residue.receipt_cid.is_some() {
-                    compute::JobStatus::ExecutionSucceeded(
-                        job.residue.receipt_cid.clone().unwrap()
-                    )
-                } else {
-                    compute::JobStatus::Running
-                }
-            },
-
-            job::Status::ExecutionFailed(err) => 
-                compute::JobStatus::ExecutionFailed(Some(err.clone())),
-            
-            // all the rest are trivial status
-            _ => compute::JobStatus::Running,
-        };
-        updates.push(compute::JobUpdate {
-            id: job.id.clone(),
-            status: status,
-            compute_type: job.compute_type.clone(),
-        });
-    }
-    updates
-}
-
-// retrieve all harvest jobs of the peer
-// fn harvest_jobs_of_peer(
-//     jobs: &HashMap::<String, job::Job>,
-//     peer_id: PeerId
-// ) -> Vec<compute::JobUpdate> {
-//     let mut updates = Vec::<compute::JobUpdate>::new();
-//     let iter = jobs.values().filter(
-//         |&j| 
-//         j.owner == peer_id &&
-//         j.status == job::Status::ExecutionSucceeded
-//     );
-//     for job in iter {      
-//         if true == job.residue.fd12_cid.is_none() {
-//             println!("Warning: missing fd12 cid for the job `{}` that is being harvested.",
-//                 job.id);
-//         }  
-//         updates.push(compute::JobUpdate {
-//             id: job.id.clone(),
-//             status: compute::JobStatus::Harvested(
-//                 compute::HarvestDetails {
-//                     fd12_cid: job.residue.fd12_cid.clone(),
-//                     receipt_cid: job.residue.receipt_cid.clone(),
-//                 }
-//             ),
-//             compute_type: job.compute_type,
-//         });
-//     }
-//     updates
-// }
-
-
-// upload stdout(fd 1) and stderr(fd 2) to a dStorage
-async fn _persist_fd12(
-    ds_client: &reqwest::Client,
-    ds_key: &str,
-    local_base_path: String,
-    job_id: String,
-) -> Result<ResidueUploadResult, Box<dyn Error>> {
-    //@ combine stdout and stderr into one and upload once
-    // upload stdout
-    let upload_res = lighthouse::upload_file(
-        ds_client, 
-        ds_key,
-        format!("{local_base_path}/stdout"),
-        format!("stdout-{job_id}")
-    ).await?; 
-    // upload stderr
-    let _ = lighthouse::upload_file(
-        ds_client, 
-        ds_key,
-        format!("{local_base_path}/stderr"),
-        format!("stderr-{job_id}")
-    ).await?;
-
-    Ok(
-        ResidueUploadResult {
-            job_id: job_id,
-            cid: upload_res.cid            
-        }
+        proof_file_path.clone(),
+        format!("{job_id}-proof")
+    ).await
+    .and_then(|upload_res|
+        Ok(UploadProof {
+            job_id: job_id.clone(),
+            proof_file_path: proof_file_path,
+            proof_cid: upload_res.cid
+        })        
     )
+    .map_err(|e| UploadProofFailure {
+        job_id: job_id.clone(),
+        err_msg: e.to_string()
+    })    
 }
-
-async fn _persist_receipt(
-    ds_client: &reqwest::Client,
-    ds_key: &str,
-    local_receipt_path: String,
-    job_id: String,
-) -> Result<ResidueUploadResult, Box<dyn Error>>  {
-    // upload receipt
-    let upload_res = lighthouse::upload_file(
-        ds_client,
-        ds_key,
-        local_receipt_path,
-        format!("receipt-{job_id}")
-    ).await?;
-      
-    Ok(
-        ResidueUploadResult {
-            job_id: job_id,
-            cid: upload_res.cid
-        }
-    )
-}
-
-

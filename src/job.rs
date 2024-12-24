@@ -1,27 +1,39 @@
 use libp2p::PeerId;
-use comms::compute::ComputeType;
-use anyhow;
-
-#[derive(Debug)]
-pub struct Residue {
-    pub receipt_cid: Option<String>,
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Status {
+    
     Running,
-    ExecutionSucceeded,     // execution finished successfully but blobs need to be uploaded
+    
+    // param: proof's cid
+    ExecutionSucceeded(String),
+    
+    // param: error message
     ExecutionFailed(String),
-    HarvestReady,           // blobs are upload and the job is ready to be harvested 
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum JobType {
+    Prove(u32),
+    Join(String, String),
+    Snark,
+}
+
 
 // maintain lifecycle of a job
 #[derive(Debug)]
 pub struct Job {
+    
+    // job id as specified by the client
     pub id: String,
-    pub owner: PeerId,       // the client
+
+    // the client
+    pub owner: PeerId,
+
     pub status: Status,
-    pub residue: Residue,    // cids for stderr, output, receipt, ...
-    pub compute_type: ComputeType,
+
+    pub proof_file_path: Option<String>,
+
+    pub job_type: JobType,
 }
 

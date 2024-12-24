@@ -125,8 +125,7 @@ pub async fn join(
     })    
 }
 
-pub async fn
-stark_to_snark(
+pub async fn to_groth16(
     job_id: String,
     in_sr_path: PathBuf
 ) -> anyhow::Result<ExecutionResult> {
