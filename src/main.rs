@@ -19,39 +19,33 @@ use std::{
     },
 };
 
-use bincode;
 // use chrono::{DateTime, Utc};
-
-// use bollard::Docker;
-// use jocker::exec::{
-//     import_docker_image,
-//     run_docker_job,
-// };
 
 use clap::Parser;
 use reqwest;
 
 use libp2p::{
     gossipsub, mdns,
-    identity, identify, kad,  
+    identity, identify,  
     swarm::{SwarmEvent},
     PeerId,
 };
 
 use tracing_subscriber::EnvFilter;
 
-use comms::{
-    p2p::{
-        MyBehaviourEvent
-    },
-    notice, compute,
-};
-use dstorage::lighthouse;
 // use uuid::Uuid;
 use anyhow;
 use bit_vec::BitVec;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+
+use comms::{
+    p2p::{ MyBehaviourEvent },
+    protocol,
+    protocol::{ Need, JobUpdate, JobType },
+};
+use dstorage::lighthouse;
+
 
 mod job;
 mod recursion;
@@ -97,20 +91,16 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
         .build()?;
 
-    // println!("Connecting to docker daemon...");
-    // let docker_con = Docker::connect_with_socket_defaults()?;
-    // docker_con.ping()?.map_ok(|_| Ok::<_, ()>(println!("Connection succeeded.")));
-
     // let's maintain a list of jobs
     let mut jobs = HashMap::<String, job::Job>::new();
     // cids' download futures
     let mut prepare_prove_job_futures = FuturesUnordered::new();
-    // let mut prepare_join_job_futures = FuturesUnordered::new();
+    let mut prepare_join_job_futures = FuturesUnordered::new();
     // let mut prepare_groth16_job_futures = FuturesUnordered::new();
 
     // pull jobs' execution
     let mut prove_execution_futures = FuturesUnordered::new();
-    // let mut join_execution_futures = FuturesUnordered::new();
+    let mut join_execution_futures = FuturesUnordered::new();
     // let mut groth16_execution_futures = FuturesUnordered::new();
 
     let mut proof_upload_futures = FuturesUnordered::new();
@@ -177,7 +167,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
     let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
     let mut rng = thread_rng();
-    // oh shit here we go again
     loop {
         select! {
             // try to discover new peers
@@ -193,14 +182,18 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .get_closest_peers(random_peer_id);
             },
 
-            // mdns events
+            // libp2p events
             event = swarm.select_next_some() => match event {
                 SwarmEvent::NewListenAddr { address, .. } => {
                     println!("[info] Local node is listening on {address}");
                 },
 
                 // mdns events
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                SwarmEvent::Behaviour(
+                    MyBehaviourEvent::Mdns(
+                        mdns::Event::Discovered(list)
+                    )
+                ) => {
                     for (peer_id, _multiaddr) in list {
                         println!("[info] mDNS discovered a new peer: {peer_id}");
                         swarm
@@ -210,7 +203,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     }
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                SwarmEvent::Behaviour(
+                    MyBehaviourEvent::Mdns(
+                        mdns::Event::Expired(list)
+                    )
+                ) => {
                     for (peer_id, _multiaddr) in list {
                         println!("[info] mDNS discovered peer has expired: {peer_id}");
                         swarm
@@ -221,11 +218,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 },
 
                 // identify events
-                SwarmEvent::Behaviour(MyBehaviourEvent::Identify(identify::Event::Received {
-                    peer_id,
-                    info,
-                    ..
-                })) => {
+                SwarmEvent::Behaviour(
+                    MyBehaviourEvent::Identify(
+                        identify::Event::Received {
+                            peer_id,
+                            info,
+                            ..
+                        }
+                    )
+                ) => {
                     println!("[info] Inbound identify event `{:#?}`", info);
                     if false == cli.dev {
                         for addr in info.listen_addrs {
@@ -239,117 +240,46 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     }
 
                 },
-
-                // kademlia events
-                // SwarmEvent::Behaviour(
-                //     MyBehaviourEvent::Kademlia(
-                //         kad::Event::OutboundQueryProgressed {
-                //             result: kad::QueryResult::GetClosestPeers(Ok(ok)),
-                //             ..
-                //         }
-                //     )
-                // ) => {
-                //     // The example is considered failed as there
-                //     // should always be at least 1 reachable peer.
-                //     if ok.peers.is_empty() {
-                //         eprintln!("Query finished with no closest peers.");
-                //     }
-
-                //     println!("Query finished with closest peers: {:#?}", ok.peers);
-                // },
-
-                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
-                //     result:
-                //         kad::QueryResult::GetClosestPeers(Err(kad::GetClosestPeersError::Timeout {
-                //             ..
-                //         })),
-                //     ..
-                // })) => {
-                //     eprintln!("Query for closest peers timed out");
-                // },
-
-                // SwarmEvent::Behaviour(
-                //     MyBehaviourEvent::Kademlia(
-                //         kad::Event::OutboundQueryProgressed {
-                //             result: kad::QueryResult::Bootstrap(Ok(ok)),
-                //             ..
-                //         }
-                //     )
-                // ) => {                    
-                //     println!("bootstrap inbound: {:#?}", ok);
-                // },
-
-                // SwarmEvent::Behaviour(
-                //     MyBehaviourEvent::Kademlia(
-                //         kad::Event::OutboundQueryProgressed {
-                //             result: kad::QueryResult::Bootstrap(Err(e)),
-                //             ..
-                //         }
-                //     )
-                // ) => {                    
-                //     println!("bootstrap error: {:#?}", e);
-                // },
-
-                // SwarmEvent::Behaviour(
-                //     MyBehaviourEvent::Kademlia(
-                //         kad::Event::RoutingUpdated{
-                //             peer,
-                //             is_new_peer,
-                //             addresses,
-                //             ..
-                //         }
-                //     )
-                // ) => {
-                //     println!("Routing updated:\npeer: `{:?}`\nis new: `{:?}`\naddresses: `{:#?}`",
-                //         peer, is_new_peer, addresses
-                //     );
-                // },
-
-                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::UnroutablePeer{
-                //     peer: peer_id
-                // })) => {
-                //     eprintln!("unroutable peer: {:?}", peer_id);
-                // },
-
-                
+            
                 SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source: peer_id,
                     message,
                     ..
                 })) => {
-                    let notice = match bincode::deserialize(&message.data) {
-                        Ok(new_notice) => new_notice,
+                    let need: Need = match bincode::deserialize(&message.data) {
                         Err(e) => {
-                            eprintln!("[warn] Gossip message decode error: `{e:?}`");
+                            eprintln!("[warn] Gossip(need) message decode error: `{e:?}`");
                             continue;
                         },
+
+                        Ok(n) => n,
                     };
-                    match notice {
-                        notice::Notice::Compute(need_compute) => {
-                            match need_compute.compute_type {
-                                compute::ComputeType::ProveAndLift(prove_details) => {
+                    match need {
+                        Need::Compute(compute_job) => {
+                            match compute_job.job_type {
+                                JobType::ProveAndLift(prove_details) => {
                                     println!("[info] New prove job from `{peer_id}`: `{prove_details:?}`");
-                                    let mut proved_map = BitVec::from_bytes(&prove_details.proved_map);
-                                    proved_map.truncate(prove_details.num_segments.try_into().unwrap());
+                                    let mut progress_map = BitVec::from_bytes(&prove_details.progress_map);
+                                    progress_map.truncate(prove_details.num_segments.try_into().unwrap());
                                     let mut unproved_segments = vec![];
-                                    for (segment_id, is_proved) in proved_map.iter().enumerate() {
+                                    for (segment_id, is_proved) in progress_map.iter().enumerate() {
                                         if false == is_proved &&
                                            false == jobs.contains_key(
-                                               &format!("{}-{}", need_compute.job_id, segment_id)
+                                               &format!("{}-{}", compute_job.job_id, segment_id)
                                            ) //@ slow af, optimize it
                                         {
                                             unproved_segments.push(segment_id);
                                         }
                                     }
                                     if unproved_segments.len() == 0 {
-                                        println!("[warn] No unproved segments to choose from.");
+                                        println!("[warn] No unproved segments to prove.");
                                         continue;
                                     }
                                     let chosen_segment = *unproved_segments.choose(&mut rng).unwrap() as u32;
                                     prepare_prove_job_futures.push(
                                         prepare_prove_job(
                                             &ds_client,
-                                            need_compute.job_id.clone(),                                                
+                                            compute_job.job_id.clone(),                                                
                                             chosen_segment,
                                             format!(
                                                 "{}/{}{}",
@@ -359,51 +289,74 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             ),
                                             peer_id
                                         )
-                                    );       
-
+                                    );
                                 },
     
-                                compute::ComputeType::Join(join_details) => {
+                                JobType::Join(join_details) => {
+                                    println!("[info] New join job from `{peer_id}`: `{join_details:?}`");
+                                    let mut progress_map = BitVec::from_bytes(&join_details.progress_map);
+                                    progress_map.truncate(join_details.pairs.len());
+                                    let mut unproved_pairs = vec![];
+                                    for (index, is_proved) in progress_map.iter().enumerate() {
+                                        let pair = &join_details.pairs[index];
+                                        if false == is_proved &&
+                                           false == jobs.contains_key(
+                                               &format!("{}-{}-{}", compute_job.job_id, pair.0, pair.1)
+                                           ) //@ slow af, optimize it
+                                        {
+                                            unproved_pairs.push(pair);
+                                        }
+                                    }
+                                    if unproved_pairs.len() == 0 {
+                                        println!("[warn] No unproved pairs to join.");
+                                        continue;
+                                    }
+                                    let choosen_pair = *unproved_pairs.choose(&mut rng).unwrap();
+                                    prepare_join_job_futures.push(
+                                        prepare_join_job(
+                                            &ds_client,
+                                            compute_job.job_id.clone(),                                                
+                                            choosen_pair.0.clone(),
+                                            choosen_pair.1.clone(),                                            
+                                            peer_id
+                                        )
+                                    );   
+
                                 },
 
-                                compute::ComputeType::Groth16(groth16_details) => {
-
-                                },
-
-                                _ => {},
-                                
+                                JobType::Groth16(_groth16_details) => {},                                
                             }
                         },
 
                         // status update inquiry
-                        notice::Notice::UpdateMe(_) => {
-                            let mut updates = Vec::<compute::JobUpdate>::new();
+                        Need::UpdateMe(_) => {
+                            let mut updates = Vec::<JobUpdate>::new();
                             for job in jobs.values() {
                                 if job.owner != peer_id {
                                     continue;
                                 }
                                 let status = match &job.status {
                                     job::Status::ExecutionSucceeded(proof_cid) =>
-                                        compute::JobStatus::ExecutionSucceeded(proof_cid.clone()),
+                                        protocol::JobStatus::ExecutionSucceeded(proof_cid.clone()),
 
                                     job::Status::ExecutionFailed(err) => 
-                                        compute::JobStatus::ExecutionFailed(Some(err.clone())),
+                                        protocol::JobStatus::ExecutionFailed(Some(err.clone())),
                                     
                                     // all the rest are trivial status
-                                    _ => compute::JobStatus::Running,
+                                    _ => protocol::JobStatus::Running,
                                 };
-                                updates.push(compute::JobUpdate {
+                                updates.push(JobUpdate {
                                     id: job.id.clone(),
                                     status: status,
                                     item: match &job.job_type {
                                         job::JobType::Prove(segment_id) => 
-                                            compute::Item::Prove(*segment_id),
+                                            protocol::Item::ProveAndLift(*segment_id),
 
                                         job::JobType::Join(left_proof_cid, right_proof_cid) =>
-                                            compute::Item::Join(left_proof_cid.clone(), right_proof_cid.clone()),
+                                            protocol::Item::Join(left_proof_cid.clone(), right_proof_cid.clone()),
 
-                                        job::JobType::Snark => 
-                                            compute::Item::Snark,
+                                        job::JobType::Groth16 => 
+                                            protocol::Item::Groth16,
                                     },
                                 });
                             }                            
@@ -412,7 +365,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     .behaviour_mut().req_resp
                                     .send_request(
                                         &peer_id,
-                                        notice::Request::Update(updates),
+                                        protocol::Request::Update(updates),
                                     );
                             }
                         },
@@ -441,7 +394,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 jobs.insert(
                     prove_id.clone(),
                     job::Job {
-                        id: prepared_prove_job.job_id,                                        
+                        id: prove_id.clone(),                                        
                         owner: prepared_prove_job.owner,
                         status: job::Status::Running,
                         proof_file_path: None,
@@ -451,7 +404,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 // run it
                 prove_execution_futures.push(
                     recursion::prove_and_lift(
-                        prove_id.clone(),
+                        prove_id,
                         prepared_prove_job.segment_file_path.into()
                     )
                 );             
@@ -468,81 +421,79 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 }
                 let res = er.unwrap();
                 let prove_id = res.job_id;             
-                println!("[info] Prove finished for `{}`, let's upload it.", prove_id);
+                println!("[info] Prove finished for `{}`, let's upload the proof.", prove_id);
                 proof_upload_futures.push(
                     upload_proof(
                         &ds_client,
                         &ds_key,
                         format!(
-                            "{}/.wholesum/jobs/prover/{}",
+                            "{}/.wholesum/prover/jobs/{}",
                             get_home_dir()?,
                             prove_id
                         ),
                         prove_id.clone(),
-                        res.blob,
+                        res.blob, //@ copying 230kb is inefficient
                     )
                 );
             },
 
             // join job is ready to start
-            // prep_res = prepare_join_job_futures.select_next_some() => {
-            //     if let Err(failed) = prep_res {
-            //         eprintln!("[warn] Failed to prepare join job: `{:#?}`", failed);
-            //         //@ wtd here?
-            //         continue;
-            //     }
-            //     let prepared_join_job: PreparedJoinJob = prep_res.unwrap();
-            //     // keep track of running jobs
-            //     jobs.insert(
-            //         prepared_join_job.join_id.clone(),
-            //         job::Job {
-            //             id: prepared_join_job.job_id,                                        
-            //             owner: prepared_join_job.owner,
-            //             status: job::Status::Running,
-            //             residue: job::Residue {
-            //                 receipt_cid: None,
-            //             },
-            //             job_type: job::JobType::Join(
-            //                 prepared_join_job.left_proof_cid,
-            //                 prepared_join_job.right_proof_cid
-            //             ),
-            //         }
-            //     );
-            //     // run it
-            //     join_execution_futures.push(
-            //         recursion::join(
-            //             prepared_join_job.join_id.clone(),
-            //             prepared_join_job.left_proof_file_path.into(),
-            //             prepared_join_job.right_proof_file_path.into()
-            //         )
-            //     );             
-            // },
+            prep_res = prepare_join_job_futures.select_next_some() => {
+                if let Err(failed) = prep_res {
+                    eprintln!("[warn] Failed to prepare join job: `{:#?}`", failed);
+                    //@ wtd here?
+                    continue;
+                }
+                let prepared_join_job: PreparedJoinJob = prep_res.unwrap();
+                // keep track of running jobs
+                jobs.insert(
+                    prepared_join_job.join_id.clone(),
+                    job::Job {
+                        id: prepared_join_job.job_id,                                        
+                        owner: prepared_join_job.owner,
+                        status: job::Status::Running,
+                        proof_file_path: None,
+                        job_type: job::JobType::Join(
+                            prepared_join_job.left_proof_cid,
+                            prepared_join_job.right_proof_cid
+                        ),
+                    }
+                );
+                // run it
+                join_execution_futures.push(
+                    recursion::join(
+                        prepared_join_job.join_id.clone(),
+                        prepared_join_job.left_proof_file_path.into(),
+                        prepared_join_job.right_proof_file_path.into()
+                    )
+                );             
+            },
 
             // join job is finished
-            // er = join_execution_futures.select_next_some() => {
-            //     if let Err(failed) = er {
-            //         eprintln!("[warn] Failed to run the join job: `{:#?}`", failed);       
-            //         let job = jobs.get_mut(&failed.job_id).unwrap();
-            //         job.status = job::Status::ExecutionFailed(failed.err_msg);
-            //         continue;
-            //     }
-            //     let res = er.unwrap();     
-            //     println!("[info] Join finished for `{}`", res.job_id);              
-            //     let job = jobs.get_mut(&res.job_id).unwrap();
-            //     let residue_path = format!(
-            //         "{}/.wholesum/jobs/prover/join/{}-upload",
-            //         get_home_dir()?,
-            //         &job.id
-            //     );
-            //     fs::create_dir_all(residue_path.clone())?;
-            //     let _ = post_job_execution(
-            //         &ds_client,
-            //         &ds_key,
-            //         job,
-            //         res.blob,
-            //         &residue_path
-            //     ).await?;                                
-            // },
+            er = join_execution_futures.select_next_some() => {
+                if let Err(failed) = er {
+                    eprintln!("[warn] Failed to run the join job: `{:#?}`", failed);       
+                    let job = jobs.get_mut(&failed.job_id).unwrap();
+                    job.status = job::Status::ExecutionFailed(failed.err_msg);
+                    continue;
+                }
+                let res = er.unwrap();     
+                let join_id = res.job_id;             
+                println!("[info] Join finished for `{}`, let's upload the proof.", join_id);
+                proof_upload_futures.push(
+                    upload_proof(
+                        &ds_client,
+                        &ds_key,
+                        format!(
+                            "{}/.wholesum/prover/jobs/{}",
+                            get_home_dir()?,
+                            join_id
+                        ),
+                        join_id.clone(),
+                        res.blob,
+                    )
+                );                            
+            },
 
             // groth16 job is finished
             // er = groth16_execution_futures.select_next_some() => {
@@ -619,7 +570,7 @@ async fn prepare_prove_job(
     owner: PeerId,
 ) -> anyhow::Result<PreparedProveJob> {
     let prove_dir = format!(
-        "{}/.wholesum/jobs/prover/{}-{}",
+        "{}/.wholesum/prover/jobs/{}-{}",
         get_home_dir()?,
         job_id,
         segment_id
@@ -667,7 +618,7 @@ async fn prepare_join_job(
     owner: PeerId,
 ) -> anyhow::Result<PreparedJoinJob> {
     let join_dir = format!(
-        "{}/.wholesum/jobs/prover/{}/join",
+        "{}/.wholesum/prover/jobs/{}/join",
         get_home_dir()?,
         job_id
     );
