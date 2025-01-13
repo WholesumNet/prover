@@ -1,38 +1,39 @@
 use libp2p::PeerId;
-use home;
-
-use comms::compute::ComputeType;
-use anyhow;
-
-#[derive(Debug)]
-pub struct Residue {
-    pub receipt_cid: Option<String>,
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Status {
+    
     Running,
-    ExecutionSucceeded,     // execution finished successfully but blobs need to be uploaded
-    ExecutionFailed,
-    HarvestReady,           // blobs are upload and the job is ready to be harvested 
+    
+    // param: proof's cid
+    ExecutionSucceeded(String),
+    
+    // param: error message
+    ExecutionFailed(String),
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum JobType {
+    Prove(u32),
+    Join(String, String),
+    Snark,
+}
+
 
 // maintain lifecycle of a job
 #[derive(Debug)]
 pub struct Job {
+    
+    // job id as specified by the client
     pub id: String,
-    pub owner: PeerId,       // the client
+
+    // the client
+    pub owner: PeerId,
+
     pub status: Status,
-    pub residue: Residue,    // cids for stderr, output, receipt, ...
-    pub compute_type: ComputeType,
+
+    pub proof_file_path: Option<String>,
+
+    pub job_type: JobType,
 }
 
-// get base residue path of the host
-pub fn get_residue_path() -> anyhow::Result<String> {
-    let err_msg = "Home dir is not available";
-    let binding = home::home_dir()
-        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
-    let home_dir = binding.to_str()
-        .ok_or_else(|| anyhow::Error::msg(err_msg))?;
-    Ok(format!("{home_dir}/.wholesum/jobs/prover"))
-}

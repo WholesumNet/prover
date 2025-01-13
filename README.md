@@ -1,4 +1,4 @@
-# Wholesum network `Server` CLI
+# Wholesum network `Prover` CLI
 
 ## Overview
 
@@ -6,28 +6,37 @@ Wholesum network is a p2p verifiable computing network `tailored for ETH L2 sequ
 
 ## How to run
 
-Bringing a server instance up involves few steps.
+Bringing a prover node up involves few steps.
 
 ### Prerequisites
 
-You would need to get certain environments ready for the server to function properly.
+You would need to get certain environments ready for the prover node to function properly.
 
-#### 1- Docker
+#### Risc0 
+
+To install Risc0, please follow the following [guide](https://github.com/risc0/risc0?tab=readme-ov-file#getting-started).
+
+
+#### Docker
 
 Docker runtime is needed as it is used to run `Risc0` containers. This awesome [guide](https://www.digitalocean.com/community/tutorials/how-to-install-and-use-docker-on-ubuntu-20-04) from DigitalOcean is helpful in this regard.
 
-### 2- Lighthouse@Filecoin/Swarmy@Swarm
+#### Decentralized storage
 
 - Lighthouse:  
-  You would need a subscription plan from [Lighthouse](https://docs.lighthouse.storage/lighthouse-1/quick-start) to run the server. Please obtain an api key and specify it with `-d` flag when running the server.
+  You would need a subscription plan from [Lighthouse](https://docs.lighthouse.storage/lighthouse-1/quick-start). Please obtain an API key, put it into a file with the following look:
+
+  <pre>
+    apiKey = 'your key'
+  </pre>
   
-- Swarmy:
+- Swarm:
   Still under develepment.
   
 
-### 3- Dependencies
+### Library dependencies
 
-To run a server agent, you would first need to fork the following libraries and put them in the parent("..") directory of the server:
+To run a prover node, you would first need to fork the following libraries and put them in the parent("..") directory of the project:
 
 - [comms](https://github.com/WholesumNet/comms)
 - [dStorage](https://github.com/WholesumNet/dStorage)
@@ -36,12 +45,15 @@ To run a server agent, you would first need to fork the following libraries and 
 ### USAGE
 
 <pre>
-Wholesum is a P2P verifiable computing marketplace and this program is a CLI for server nodes.
-Usage: server [OPTIONS]
+Wholesum is a P2P verifiable computing marketplace and this program is a CLI for prover nodes.
+
+Usage: prover [OPTIONS]
+
 Options:
-  -d, --dstorage-key-file <DSTORAGE_KEY_FILE>  
+  -d, --dstorage-key-file &lt;DSTORAGE_KEY_FILE&gt;  
       --dev                                    
-  -k, --key-file <KEY_FILE>                    
+  -k, --key-file &lt;KEY_FILE&gt;                    
   -h, --help                                   Print help
   -V, --version                                Print version
+
 </pre>
