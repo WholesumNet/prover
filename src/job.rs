@@ -16,7 +16,7 @@ pub enum Status {
 pub enum JobType {
     Prove(u32),
     Join(String, String),
-    Snark,
+    Groth16,
 }
 
 
