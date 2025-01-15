@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
     // Libp2p swarm 
     let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
-    let topic = gossipsub::IdentTopic::new("<-- p2p compute bazaar -->");
+    let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
     let _ = 
         swarm
             .behaviour_mut()
@@ -227,7 +227,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         }
                     )
                 ) => {
-                    println!("[info] Inbound identify event `{:#?}`", info);
+                    // println!("[info] Inbound identify event `{:#?}`", info);
                     if false == cli.dev {
                         for addr in info.listen_addrs {
                             // if false == addr.iter().any(|item| item == &"127.0.0.1" || item == &"::1"){
@@ -272,7 +272,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         }
                                     }
                                     if unproved_segments.len() == 0 {
-                                        println!("[warn] No unproved segments to prove.");
+                                        println!("[warn] No more segments to prove.");
                                         continue;
                                     }
                                     let chosen_segment = *unproved_segments.choose(&mut rng).unwrap() as u32;
@@ -320,8 +320,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             choosen_pair.1.clone(),                                            
                                             peer_id
                                         )
-                                    );   
-
+                                    );
                                 },
 
                                 JobType::Groth16(_groth16_details) => {},                                
@@ -331,7 +330,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         // status update inquiry
                         Need::UpdateMe(_) => {
                             let mut updates = Vec::<JobUpdate>::new();
-                            for job in jobs.values() {
+                            for (job_id, job) in jobs.iter() {
                                 if job.owner != peer_id {
                                     continue;
                                 }
@@ -345,20 +344,24 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     // all the rest are trivial status
                                     _ => protocol::JobStatus::Running,
                                 };
+                                let item = match &job.job_type {
+                                    job::JobType::Prove(segment_id) => 
+                                        protocol::Item::ProveAndLift(*segment_id),
+                                    
+                                    job::JobType::Join(left_proof_cid, right_proof_cid) =>
+                                        protocol::Item::Join(
+                                            left_proof_cid.clone(),
+                                            right_proof_cid.clone()
+                                        ),
+
+                                    job::JobType::Groth16 => 
+                                        protocol::Item::Groth16,
+                                };
                                 updates.push(JobUpdate {
-                                    id: job.id.clone(),
+                                    id: job.base_id.clone(),
                                     status: status,
-                                    item: match &job.job_type {
-                                        job::JobType::Prove(segment_id) => 
-                                            protocol::Item::ProveAndLift(*segment_id),
-
-                                        job::JobType::Join(left_proof_cid, right_proof_cid) =>
-                                            protocol::Item::Join(left_proof_cid.clone(), right_proof_cid.clone()),
-
-                                        job::JobType::Groth16 => 
-                                            protocol::Item::Groth16,
-                                    },
-                                });
+                                    item: item,
+                                });                                
                             }                            
                             if updates.len() > 0 {
                                 let _ = swarm
@@ -390,11 +393,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     prepared_prove_job.job_id,
                     prepared_prove_job.segment_id
                 );
-                // keep track of running jobs
-                jobs.insert(
+                // keep track of running jobs                
+                jobs.insert(                    
                     prove_id.clone(),
                     job::Job {
-                        id: prove_id.clone(),                                        
+                        base_id: prepared_prove_job.job_id,
                         owner: prepared_prove_job.owner,
                         status: job::Status::Running,
                         proof_file_path: None,
@@ -444,12 +447,18 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     //@ wtd here?
                     continue;
                 }
-                let prepared_join_job: PreparedJoinJob = prep_res.unwrap();
-                // keep track of running jobs
+                let prepared_join_job: PreparedJoinJob = prep_res.unwrap();                
+                let join_id = format!(
+                    "{}-{}-{}",
+                    prepared_join_job.job_id,
+                    prepared_join_job.left_proof_cid,
+                    prepared_join_job.right_proof_cid
+                );
+                // keep track of running jobs                
                 jobs.insert(
-                    prepared_join_job.join_id.clone(),
+                    join_id.clone(),
                     job::Job {
-                        id: prepared_join_job.job_id,                                        
+                        base_id: prepared_join_job.job_id,
                         owner: prepared_join_job.owner,
                         status: job::Status::Running,
                         proof_file_path: None,
@@ -462,7 +471,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 // run it
                 join_execution_futures.push(
                     recursion::join(
-                        prepared_join_job.join_id.clone(),
+                        join_id.clone(),
                         prepared_join_job.left_proof_file_path.into(),
                         prepared_join_job.right_proof_file_path.into()
                     )
@@ -548,8 +557,7 @@ pub fn get_home_dir() -> anyhow::Result<String> {
 }
 
 #[derive(Debug, Clone)]
-struct PreparedProveJob {
-    
+struct PreparedProveJob {    
     // client specified id
     job_id: String,
 
@@ -593,11 +601,8 @@ async fn prepare_prove_job(
 
 #[derive(Debug, Clone)]
 struct PreparedJoinJob {
-    
+    // client specified id    
     job_id: String,
-    
-    // "job_id-left_cid-right_cid"
-    join_id: String,
     
     owner: PeerId,
     
@@ -638,7 +643,6 @@ async fn prepare_join_job(
     
     Ok(PreparedJoinJob {
         job_id: job_id.clone(),
-        join_id: format!("{job_id}-{left_proof_cid}-{right_proof_cid}"),
         owner: owner,
         left_proof_cid: left_proof_cid,
         left_proof_file_path: left_proof_file_path,
