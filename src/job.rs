@@ -1,8 +1,7 @@
 use libp2p::PeerId;
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Status {
-    
+pub enum Status {    
     Running,
     
     // param: proof's cid
@@ -23,10 +22,9 @@ pub enum JobType {
 // maintain lifecycle of a job
 #[derive(Debug)]
 pub struct Job {
-    
     // job id as specified by the client
-    pub id: String,
-
+    pub base_id: String, 
+    
     // the client
     pub owner: PeerId,
 
