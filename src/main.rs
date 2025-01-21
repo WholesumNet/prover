@@ -258,24 +258,30 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         Need::Compute(compute_job) => {
                             match compute_job.job_type {
                                 JobType::ProveAndLift(prove_details) => {
-                                    println!("[info] New prove job from `{peer_id}`: `{prove_details:?}`");
+                                    println!("[info] New prove job from `{peer_id}`: `{prove_details:#?}`");
                                     let mut progress_map = BitVec::from_bytes(&prove_details.progress_map);
                                     progress_map.truncate(prove_details.num_segments.try_into().unwrap());
                                     let mut unproved_segments = vec![];
                                     for (segment_id, is_proved) in progress_map.iter().enumerate() {
-                                        if false == is_proved &&
-                                           false == jobs.contains_key(
-                                               &format!("{}-{}", compute_job.job_id, segment_id)
-                                           ) //@ slow af, optimize it
-                                        {
-                                            unproved_segments.push(segment_id);
+                                        if true == is_proved {
+                                            continue;
                                         }
+                                        //@ slow af
+                                        let job_id = format!("{}-{}", compute_job.job_id, segment_id);
+                                        if let Some(job) = jobs.get(&job_id) {
+                                            if let job::Status::ExecutionFailed(_) = job.status {
+                                                unproved_segments.push(segment_id);
+                                            }
+                                        } else {
+                                            unproved_segments.push(segment_id);
+                                        }                                                                                   
                                     }
                                     if unproved_segments.len() == 0 {
                                         println!("[warn] No more segments to prove.");
                                         continue;
                                     }
                                     let chosen_segment = *unproved_segments.choose(&mut rng).unwrap() as u32;
+                                    println!("[info] Picked `segment {chosen_segment}` to prove.");
                                     prepare_prove_job_futures.push(
                                         prepare_prove_job(
                                             &ds_client,
@@ -293,7 +299,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 },
     
                                 JobType::Join(join_details) => {
-                                    println!("[info] New join job from `{peer_id}`: `{join_details:?}`");
+                                    println!("[info] New join job from `{peer_id}`: `{join_details:#?}`");
                                     let mut progress_map = BitVec::from_bytes(&join_details.progress_map);
                                     progress_map.truncate(join_details.pairs.len());
                                     let mut unproved_pairs = vec![];
@@ -330,19 +336,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         // status update inquiry
                         Need::UpdateMe(_) => {
                             let mut updates = Vec::<JobUpdate>::new();
-                            for (job_id, job) in jobs.iter() {
+                            for (_job_id, job) in jobs.iter() {
                                 if job.owner != peer_id {
                                     continue;
                                 }
-                                let status = match &job.status {
+                                let proof_cid = match &job.status {
                                     job::Status::ExecutionSucceeded(proof_cid) =>
-                                        protocol::JobStatus::ExecutionSucceeded(proof_cid.clone()),
-
-                                    job::Status::ExecutionFailed(err) => 
-                                        protocol::JobStatus::ExecutionFailed(Some(err.clone())),
+                                        proof_cid.clone(),
                                     
-                                    // all the rest are trivial status
-                                    _ => protocol::JobStatus::Running,
+                                    _ => continue,
                                 };
                                 let item = match &job.job_type {
                                     job::JobType::Prove(segment_id) => 
@@ -359,8 +361,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 };
                                 updates.push(JobUpdate {
                                     id: job.base_id.clone(),
-                                    status: status,
                                     item: item,
+                                    proof_cid: proof_cid,
                                 });                                
                             }                            
                             if updates.len() > 0 {
@@ -531,7 +533,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             failure.err_msg
                         );
                         let job = jobs.get_mut(&failure.job_id).unwrap();
-                        job.status = job::Status::ExecutionFailed(failure.err_msg);
+                        job.status = job::Status::UploadFailed(failure.err_msg);
 
                     },
 
