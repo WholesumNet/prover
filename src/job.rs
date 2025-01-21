@@ -9,6 +9,9 @@ pub enum Status {
     
     // param: error message
     ExecutionFailed(String),
+
+    // param: error message
+    UploadFailed(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
