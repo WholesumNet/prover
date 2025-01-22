@@ -42,7 +42,7 @@ use rand::thread_rng;
 use comms::{
     p2p::{ MyBehaviourEvent },
     protocol,
-    protocol::{ Need, JobUpdate, JobType },
+    protocol::{ Need, Proof, JobType },
 };
 use dstorage::lighthouse;
 
@@ -267,8 +267,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             continue;
                                         }
                                         //@ slow af
-                                        let job_id = format!("{}-{}", compute_job.job_id, segment_id);
-                                        if let Some(job) = jobs.get(&job_id) {
+                                        let prove_id = format!("{}-{}", compute_job.job_id, segment_id);
+                                        if let Some(job) = jobs.get(&prove_id) {
                                             if let job::Status::ExecutionFailed(_) = job.status {
                                                 unproved_segments.push(segment_id);
                                             }
@@ -305,19 +305,32 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     let mut unproved_pairs = vec![];
                                     for (index, is_proved) in progress_map.iter().enumerate() {
                                         let pair = &join_details.pairs[index];
-                                        if false == is_proved &&
-                                           false == jobs.contains_key(
-                                               &format!("{}-{}-{}", compute_job.job_id, pair.0, pair.1)
-                                           ) //@ slow af, optimize it
-                                        {
-                                            unproved_pairs.push(pair);
+                                        // if false == is_proved &&
+                                        //    false == jobs.contains_key(
+                                        //        &format!("{}-{}-{}", compute_job.job_id, pair.0, pair.1)
+                                        //    ) //@ slow af, optimize it
+                                        // {
+                                        //     unproved_pairs.push(pair);
+                                        // }
+                                        if true == is_proved {
+                                            continue;
                                         }
+                                        //@ slow af
+                                        let join_id = format!("{}-{}-{}", compute_job.job_id, pair.0, pair.1);
+                                        if let Some(job) = jobs.get(&join_id) {
+                                            if let job::Status::ExecutionFailed(_) = job.status {
+                                                unproved_pairs.push(pair);
+                                            }
+                                        } else {
+                                            unproved_pairs.push(pair);
+                                        } 
                                     }
                                     if unproved_pairs.len() == 0 {
                                         println!("[warn] No unproved pairs to join.");
                                         continue;
                                     }
                                     let choosen_pair = *unproved_pairs.choose(&mut rng).unwrap();
+                                    println!("[info] Picked `pair {choosen_pair:?}` to join.");
                                     prepare_join_job_futures.push(
                                         prepare_join_job(
                                             &ds_client,
@@ -335,7 +348,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
                         // status update inquiry
                         Need::UpdateMe(_) => {
-                            let mut updates = Vec::<JobUpdate>::new();
+                            let mut proofs = Vec::<Proof>::new();
                             for (_job_id, job) in jobs.iter() {
                                 if job.owner != peer_id {
                                     continue;
@@ -346,31 +359,31 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     
                                     _ => continue,
                                 };
-                                let item = match &job.job_type {
+                                let proof_type = match &job.job_type {
                                     job::JobType::Prove(segment_id) => 
-                                        protocol::Item::ProveAndLift(*segment_id),
+                                        protocol::ProofType::ProveAndLift(*segment_id),
                                     
                                     job::JobType::Join(left_proof_cid, right_proof_cid) =>
-                                        protocol::Item::Join(
+                                        protocol::ProofType::Join(
                                             left_proof_cid.clone(),
                                             right_proof_cid.clone()
                                         ),
 
                                     job::JobType::Groth16 => 
-                                        protocol::Item::Groth16,
+                                        protocol::ProofType::Groth16,
                                 };
-                                updates.push(JobUpdate {
-                                    id: job.base_id.clone(),
-                                    item: item,
-                                    proof_cid: proof_cid,
+                                proofs.push(Proof {
+                                    job_id: job.base_id.clone(),
+                                    proof_type: proof_type,
+                                    cid: proof_cid,
                                 });                                
                             }                            
-                            if updates.len() > 0 {
+                            if proofs.len() > 0 {
                                 let _ = swarm
                                     .behaviour_mut().req_resp
                                     .send_request(
                                         &peer_id,
-                                        protocol::Request::Update(updates),
+                                        protocol::Request::ProofIsReady(proofs),
                                     );
                             }
                         },
@@ -400,6 +413,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     prove_id.clone(),
                     job::Job {
                         base_id: prepared_prove_job.job_id,
+                        working_dir: prepared_prove_job.working_dir,
                         owner: prepared_prove_job.owner,
                         status: job::Status::Running,
                         proof_file_path: None,
@@ -425,18 +439,14 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     continue;
                 }
                 let res = er.unwrap();
-                let prove_id = res.job_id;             
-                println!("[info] Prove finished for `{}`, let's upload the proof.", prove_id);
+                let job = jobs.get(&res.job_id).unwrap();                
+                println!("[info] Prove finished for `{}`, let's upload the proof.", res.job_id);
                 proof_upload_futures.push(
                     upload_proof(
                         &ds_client,
                         &ds_key,
-                        format!(
-                            "{}/.wholesum/prover/jobs/{}",
-                            get_home_dir()?,
-                            prove_id
-                        ),
-                        prove_id.clone(),
+                        job.working_dir.clone(),
+                        res.job_id.clone(),
                         res.blob, //@ copying 230kb is inefficient
                     )
                 );
@@ -461,6 +471,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     join_id.clone(),
                     job::Job {
                         base_id: prepared_join_job.job_id,
+                        working_dir: prepared_join_job.working_dir,
                         owner: prepared_join_job.owner,
                         status: job::Status::Running,
                         proof_file_path: None,
@@ -488,19 +499,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     job.status = job::Status::ExecutionFailed(failed.err_msg);
                     continue;
                 }
-                let res = er.unwrap();     
-                let join_id = res.job_id;             
-                println!("[info] Join finished for `{}`, let's upload the proof.", join_id);
+                let res = er.unwrap();
+                let job = jobs.get(&res.job_id).unwrap();
+                println!("[info] Join finished for `{}`, let's upload the proof.", res.job_id);
                 proof_upload_futures.push(
                     upload_proof(
                         &ds_client,
                         &ds_key,
-                        format!(
-                            "{}/.wholesum/prover/jobs/{}",
-                            get_home_dir()?,
-                            join_id
-                        ),
-                        join_id.clone(),
+                        job.working_dir.clone(),
+                        res.job_id.clone(),
                         res.blob,
                     )
                 );                            
@@ -565,9 +572,12 @@ struct PreparedProveJob {
 
     segment_id: u32,
     
+    working_dir: String,
+    
     owner: PeerId,
     
     segment_file_path: String,
+
 }
 
 // set up prove job for execution:
@@ -579,14 +589,14 @@ async fn prepare_prove_job(
     segment_cid: String,
     owner: PeerId,
 ) -> anyhow::Result<PreparedProveJob> {
-    let prove_dir = format!(
-        "{}/.wholesum/prover/jobs/{}-{}",
+    let working_dir = format!(
+        "{}/.wholesum/prover/jobs/{}/prove/{}",
         get_home_dir()?,
         job_id,
         segment_id
     );
-    fs::create_dir_all(prove_dir.clone())?;
-    let segment_file_path = format!("{prove_dir}/segment-{segment_id}");
+    fs::create_dir_all(working_dir.clone())?;
+    let segment_file_path = format!("{working_dir}/segment");
     lighthouse::download_file(
         ds_client,
         &segment_cid,
@@ -596,6 +606,7 @@ async fn prepare_prove_job(
     Ok(PreparedProveJob {
         job_id: job_id.clone(),
         segment_id: segment_id,
+        working_dir: working_dir,
         owner: owner,
         segment_file_path: segment_file_path
     })
@@ -613,6 +624,8 @@ struct PreparedJoinJob {
 
     right_proof_cid: String,
     right_proof_file_path: String,
+
+    working_dir: String,
 }
 
 // set up join job for execution:
@@ -624,19 +637,21 @@ async fn prepare_join_job(
     right_proof_cid: String,
     owner: PeerId,
 ) -> anyhow::Result<PreparedJoinJob> {
-    let join_dir = format!(
-        "{}/.wholesum/prover/jobs/{}/join",
+    let working_dir = format!(
+        "{}/.wholesum/prover/jobs/{}/join/{}-{}",
         get_home_dir()?,
-        job_id
+        job_id,
+        left_proof_cid,
+        right_proof_cid
     );
-    fs::create_dir_all(join_dir.clone())?;
-    let left_proof_file_path = format!("{join_dir}/{left_proof_cid}-left");
+    fs::create_dir_all(working_dir.clone())?;
+    let left_proof_file_path = format!("{working_dir}/left");
     lighthouse::download_file(
         ds_client,
         &left_proof_cid,
         left_proof_file_path.clone()
     ).await?;
-    let right_proof_file_path = format!("{join_dir}/{right_proof_cid}-right");
+    let right_proof_file_path = format!("{working_dir}/right");
     lighthouse::download_file(
         ds_client,
         &right_proof_cid,
@@ -649,7 +664,8 @@ async fn prepare_join_job(
         left_proof_cid: left_proof_cid,
         left_proof_file_path: left_proof_file_path,
         right_proof_cid: right_proof_cid,
-        right_proof_file_path: right_proof_file_path
+        right_proof_file_path: right_proof_file_path,
+        working_dir: working_dir
     })
 }
 
@@ -674,12 +690,12 @@ pub struct UploadProofFailure {
 async fn upload_proof(
     ds_client: &reqwest::Client,
     ds_key: &str,
-    residue_dir: String,
+    working_dir: String,
     job_id: String,
     proof_blob: Vec<u8>,
 ) -> anyhow::Result<UploadProof, UploadProofFailure> {
     // save to disk
-    let proof_file_path = format!("{residue_dir}/proof");
+    let proof_file_path = format!("{working_dir}/proof");
     let _bytes_written = fs::write(
         &proof_file_path,
         proof_blob

@@ -27,6 +27,8 @@ pub enum JobType {
 pub struct Job {
     // job id as specified by the client
     pub base_id: String, 
+
+    pub working_dir: String,
     
     // the client
     pub owner: PeerId,
