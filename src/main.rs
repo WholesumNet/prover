@@ -347,9 +347,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         },
 
                         // status update inquiry
-                        Need::UpdateMe(_) => {
+                        Need::UpdateMe(req_job_id) => {
                             let mut proofs = Vec::<Proof>::new();
-                            for (_job_id, job) in jobs.iter() {
+                            for job in jobs.values().filter(|j| j.base_id == req_job_id) {
                                 if job.owner != peer_id {
                                     continue;
                                 }
@@ -547,7 +547,29 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     Ok(uploaded)=> {
                         let job = jobs.get_mut(&uploaded.job_id).unwrap();
                         job.proof_file_path = Some(uploaded.proof_file_path);
-                        job.status = job::Status::ExecutionSucceeded(uploaded.proof_cid);
+                        job.status = job::Status::ExecutionSucceeded(uploaded.proof_cid.clone());
+                        let proof_type = match &job.job_type {
+                            job::JobType::Prove(segment_id) => 
+                                protocol::ProofType::ProveAndLift(*segment_id),
+
+                            job::JobType::Join(left_cid, right_cid) => 
+                                protocol::ProofType::Join(left_cid.clone(), right_cid.clone()),
+
+                            _ => continue,
+                        };
+                        let _ = swarm
+                            .behaviour_mut()
+                            .req_resp
+                            .send_request(
+                                &job.owner,
+                                protocol::Request::ProofIsReady(vec![
+                                    protocol::Proof {
+                                        job_id: job.base_id.clone(),
+                                        proof_type: proof_type,
+                                        cid: uploaded.proof_cid
+                                    }
+                                ])
+                            );
                     },
 
                 };
