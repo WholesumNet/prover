@@ -35,7 +35,7 @@ pub struct Job {
 
     pub status: Status,
 
-    pub proof_file_path: Option<String>,
+    pub proof_file_path: Option<String>,    
 
     pub job_type: JobType,
 }
