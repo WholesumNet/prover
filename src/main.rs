@@ -38,7 +38,7 @@ use anyhow;
 use bit_vec::BitVec;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-
+use base64::{Engine as _, engine::{self, general_purpose}, alphabet};
 use comms::{
     p2p::{ MyBehaviourEvent },
     protocol,
@@ -96,12 +96,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     // cids' download futures
     let mut prepare_prove_job_futures = FuturesUnordered::new();
     let mut prepare_join_job_futures = FuturesUnordered::new();
-    // let mut prepare_groth16_job_futures = FuturesUnordered::new();
+    let mut prepare_groth16_job_futures = FuturesUnordered::new();
 
     // pull jobs' execution
     let mut prove_execution_futures = FuturesUnordered::new();
     let mut join_execution_futures = FuturesUnordered::new();
-    // let mut groth16_execution_futures = FuturesUnordered::new();
+    let mut groth16_execution_futures = FuturesUnordered::new();
 
     let mut proof_upload_futures = FuturesUnordered::new();
     
@@ -342,7 +342,20 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     );
                                 },
 
-                                JobType::Groth16(_groth16_details) => {},                                
+                                JobType::Groth16(groth16_details) => {
+                                    println!("[info] New groth16 job from `{peer_id}`: `{groth16_details:#?}`");
+                                    if jobs.contains_key(&format!("{}-g16", compute_job.job_id)) {
+                                        continue;
+                                    }                                                                        
+                                    prepare_groth16_job_futures.push(
+                                        prepare_groth16_job(
+                                            &ds_client,
+                                            compute_job.job_id.clone(),                                                
+                                            groth16_details.cid.clone(),
+                                            peer_id
+                                        )
+                                    );                                    
+                                },                                
                             }
                         },
 
@@ -513,22 +526,66 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 );                            
             },
 
+            // groth16 job is ready to start
+            prep_res = prepare_groth16_job_futures.select_next_some() => {
+                if let Err(failed) = prep_res {
+                    eprintln!("[warn] Failed to prepare groth16 job: `{:#?}`", failed);
+                    //@ wtd here?
+                    continue;
+                }
+                let prepared_groth16_job: PreparedGroth16Job = prep_res.unwrap();
+                let groth16_id = format!("{}-g16",prepared_groth16_job.job_id);
+                // keep track of running jobs                
+                jobs.insert(                    
+                    groth16_id.clone(),
+                    job::Job {
+                        base_id: prepared_groth16_job.job_id,
+                        working_dir: prepared_groth16_job.working_dir,
+                        owner: prepared_groth16_job.owner,
+                        status: job::Status::Running,
+                        proof_file_path: None,
+                        job_type: job::JobType::Groth16,
+                    },
+                );
+                // run it
+                groth16_execution_futures.push(
+                    recursion::to_groth16(
+                        groth16_id,
+                        prepared_groth16_job.input_proof_file_path.into()
+                    )
+                );             
+            },
+
             // groth16 job is finished
-            // er = groth16_execution_futures.select_next_some() => {
-            //     if let Err(failed) = er {
-            //         eprintln!("[warn] Failed to run the groth16 job: `{:#?}`", failed);       
-            //         //@ what to to with job id?
-            //         // let _job_id = failed.who;
-            //         // job.status = job::Status::ExecutionFailed;
-            //         //     eprintln!("[warn] Job `{}`'s execution finished with error: `{}`",
-            //         //         exec_res.job_id,
-            //         //         exec_res.error_message.unwrap_or_else(|| String::from("")),
-            //         //     );
-
-
-            //         continue;
-            //     }                                
-            // },
+            er = groth16_execution_futures.select_next_some() => {                
+                if let Err(failed) = er {
+                    eprintln!("[warn] Failed to run the groth16 job: `{:#?}`", failed);       
+                    //@ wtd with job?
+                    let job = jobs.get_mut(&failed.job_id).unwrap();
+                    job.status = job::Status::ExecutionFailed(failed.err_msg);
+                    continue;
+                }
+                let res = er.unwrap();
+                let job = jobs.get_mut(&res.job_id).unwrap();                
+                println!("[info] Groth16 extraction is finished for `{}`, let's upload the proof.", res.job_id);
+                const CUSTOM_ENGINE: engine::GeneralPurpose =
+                    engine::GeneralPurpose::new(&alphabet::URL_SAFE, general_purpose::NO_PAD);
+                let b64_encoded_proof = CUSTOM_ENGINE.encode(res.blob);
+                job.status = job::Status::ExecutionSucceeded(b64_encoded_proof.clone());
+                let _ = swarm
+                    .behaviour_mut()
+                    .req_resp
+                    .send_request(
+                        &job.owner,
+                        protocol::Request::ProofIsReady(vec![
+                            protocol::Proof {
+                                job_id: job.base_id.clone(),
+                                proof_type: protocol::ProofType::Groth16,
+                                cid: b64_encoded_proof
+                            }
+                        ])
+                    );
+            },
 
             // proof upload is ready
             upload_res = proof_upload_futures.select_next_some() => {
@@ -688,6 +745,47 @@ async fn prepare_join_job(
         right_proof_cid: right_proof_cid,
         right_proof_file_path: right_proof_file_path,
         working_dir: working_dir
+    })
+}
+
+#[derive(Debug, Clone)]
+struct PreparedGroth16Job {    
+    // client specified id
+    job_id: String,
+
+    working_dir: String,
+    
+    owner: PeerId,
+    
+    input_proof_file_path: String,
+}
+
+// set up prove job for execution:
+//   - download segment and save it to job's folder
+async fn prepare_groth16_job(
+    ds_client: &reqwest::Client,
+    job_id: String,
+    input_proof_cid: String,
+    owner: PeerId,
+) -> anyhow::Result<PreparedGroth16Job> {
+    let working_dir = format!(
+        "{}/.wholesum/prover/jobs/{}/groth16",
+        get_home_dir()?,
+        job_id,
+    );
+    fs::create_dir_all(working_dir.clone())?;
+    let input_proof_file_path = format!("{working_dir}/input_proof");
+    lighthouse::download_file(
+        ds_client,
+        &input_proof_cid,
+        input_proof_file_path.clone()
+    ).await?;
+    
+    Ok(PreparedGroth16Job {
+        job_id: job_id.clone(),
+        working_dir: working_dir,
+        owner: owner,
+        input_proof_file_path: input_proof_file_path
     })
 }
 

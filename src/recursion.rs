@@ -38,7 +38,7 @@ pub async fn prove_and_lift(
     job_id: String,
     seg_path: PathBuf
 ) -> Result<ExecutionResult, ExecutionError> {
-    println!("[info] Proving segment `{}`...", job_id);
+    println!("[info] Proving segment `{job_id}`...");
     let now = Instant::now();      
     ApiClient::from_env()
     .and_then(|r0_client|    
@@ -75,7 +75,7 @@ pub async fn prove_and_lift(
                     asset.as_bytes()?.into()
                 };
                 let prove_dur = now.elapsed().as_secs();
-                println!("prove took `{prove_dur} secs`.");  
+                println!("[info](DUR) prove took `{prove_dur} secs`.");  
                 Ok(ExecutionResult {
                     job_id: job_id.clone(),
                     blob: blob
@@ -94,10 +94,10 @@ pub async fn join(
     left_sr_path: PathBuf,
     right_sr_path: PathBuf,
 ) -> Result<ExecutionResult, ExecutionError> {
-    println!("[info] Joining receipts: `{}`...", job_id);
-    let now = Instant::now();     
+    println!("[info] Joining proofs `{job_id}`...", );
     ApiClient::from_env()
     .and_then(|r0_client|
+        let now = Instant::now();     
         r0_client
         .join(
             &ProverOpts::succinct(),
@@ -112,7 +112,7 @@ pub async fn join(
                 asset.as_bytes()?.into()
             };
             let join_dur = now.elapsed().as_secs();
-            println!("[info] Join took `{join_dur} secs`.");  
+            println!("[info](DUR) join took `{join_dur} secs`.");  
             Ok(ExecutionResult {
                 job_id: job_id.clone(),
                 blob: blob
@@ -128,52 +128,63 @@ pub async fn join(
 pub async fn to_groth16(
     job_id: String,
     in_sr_path: PathBuf
-) -> anyhow::Result<ExecutionResult> {
-    let r0_client = ApiClient::from_env()?;
-    // fist transform via identity_p254
-    let now = Instant::now();
-    let p254_receipt = r0_client
+) -> anyhow::Result<ExecutionResult, ExecutionError> {
+    ApiClient::from_env()
+    .and_then(|r0_client| {
+        println!("[info] Transforming proof via identity_p254 `{job_id}`...");
+        let now = Instant::now();
+        // 1. transform via identity_p254
+        r0_client
         .identity_p254(
             &ProverOpts::succinct(),
             Asset::Path(in_sr_path),
             AssetRequest::Inline,
-        )?;
-    let dur = now.elapsed().as_secs();
-    println!("identity_p254 took `{dur} secs`");
-    //
-    let verifier_parameters = SuccinctReceiptVerifierParameters {
-        control_root: MerkleGroup::new(vec![BN254_IDENTITY_CONTROL_ID])
-            .unwrap()
-            .calc_root(Poseidon254HashSuite::new_suite().hashfn.as_ref()),
-        inner_control_root: Some(ALLOWED_CONTROL_ROOT),
-        ..Default::default()
-    };
-    let _ = p254_receipt.verify_integrity_with_context(
-        &VerifierContext::empty()
-            .with_suites(BTreeMap::from([(
-                "poseidon_254".to_string(),
-                Poseidon254HashSuite::new_suite(),
-            )]))
-            .with_succinct_verifier_parameters(verifier_parameters),
-    ).unwrap();
-    // std::fs::write("segs/snark/p254", bincode::serialize(&p254_receipt)?);
-    // and then extract the compressed snark(Groth16)
-    let asset: Asset = p254_receipt.try_into()?;    
-    let now = Instant::now();    
-    let groth16_receipt = r0_client
-        .compress(
-            &ProverOpts::groth16(),
-            Asset::Inline(asset.as_bytes()?),
-            AssetRequest::Inline,
-        )?;
-    let dur = now.elapsed().as_secs();
-    println!("compress took `{dur} secs`");
-    let blob: Vec<u8> = {
-        let asset: Asset = groth16_receipt.try_into()?;
-        asset.as_bytes()?.into()
-    };
-    Ok(ExecutionResult {
-        job_id: job_id,
-        blob: blob
+        )
+        .and_then(|p254_receipt| {
+            let dur = now.elapsed().as_secs();
+            println!("[info](DUR) identity_p254 took `{dur} secs`");
+
+            let verifier_parameters = SuccinctReceiptVerifierParameters {
+                control_root: MerkleGroup::new(vec![BN254_IDENTITY_CONTROL_ID])?
+                    .calc_root(Poseidon254HashSuite::new_suite().hashfn.as_ref()),
+                inner_control_root: Some(ALLOWED_CONTROL_ROOT),
+                ..Default::default()
+            };
+            let _ = p254_receipt.verify_integrity_with_context(
+                &VerifierContext::empty()
+                    .with_suites(BTreeMap::from([(
+                        "poseidon_254".to_string(),
+                        Poseidon254HashSuite::new_suite(),
+                    )]))
+                    .with_succinct_verifier_parameters(verifier_parameters),
+            )?;
+            Ok(p254_receipt)
+        })
+        .and_then(|p254_receipt| {
+            // 2. extract the compressed snark(Groth16)
+            let asset: Asset = p254_receipt.try_into()?;
+            println!("[info] compressing the p254 proof to get a groth16 proof...`");    
+            let now = Instant::now();    
+            let groth16_receipt = r0_client
+                .compress(
+                    &ProverOpts::groth16(),
+                    Asset::Inline(asset.as_bytes()?),
+                    AssetRequest::Inline,
+                )?;
+            let dur = now.elapsed().as_secs();
+            println!("[info](DUR) compress took `{dur} secs`");
+            let blob: Vec<u8> = {
+                let asset: Asset = groth16_receipt.try_into()?;
+                asset.as_bytes()?.into()
+            };
+            Ok(ExecutionResult {
+                job_id: job_id.clone(),
+                blob: blob
+            })
+        })
+    })
+    .map_err(|e| ExecutionError {
+        job_id: job_id.clone(),
+        err_msg: e.to_string()
     })
 }

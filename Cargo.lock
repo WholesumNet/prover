@@ -3927,6 +3927,7 @@ dependencies = [
  "anyhow",
  "async-std",
  "async-trait",
+ "base64 0.22.1",
  "bincode",
  "bit-vec",
  "chrono",
