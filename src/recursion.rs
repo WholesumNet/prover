@@ -39,9 +39,9 @@ pub async fn prove_and_lift(
     seg_path: PathBuf
 ) -> Result<ExecutionResult, ExecutionError> {
     println!("[info] Proving segment `{job_id}`...");
-    let now = Instant::now();      
     ApiClient::from_env()
-    .and_then(|r0_client|    
+    .and_then(|r0_client| {   
+        let now = Instant::now();      
         r0_client
         .prove_segment(
             &ProverOpts::succinct(),
@@ -82,7 +82,7 @@ pub async fn prove_and_lift(
                 })    
             })
         )        
-    )    
+    })    
     .map_err(|e| ExecutionError {
         job_id: job_id.clone(),
         err_msg: e.to_string()
@@ -96,7 +96,7 @@ pub async fn join(
 ) -> Result<ExecutionResult, ExecutionError> {
     println!("[info] Joining proofs `{job_id}`...", );
     ApiClient::from_env()
-    .and_then(|r0_client|
+    .and_then(|r0_client| {
         let now = Instant::now();     
         r0_client
         .join(
@@ -118,7 +118,7 @@ pub async fn join(
                 blob: blob
             })        
         })        
-    )
+    })
     .map_err(|e| ExecutionError {
         job_id: job_id.clone(),
         err_msg: e.to_string()

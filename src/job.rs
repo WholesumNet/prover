@@ -10,8 +10,8 @@ pub enum Status {
     // param: error message
     ExecutionFailed(String),
 
-    // param: error message
-    UploadFailed(String),
+    // param: failed upload retry attempts so far
+    UploadFailed(u32),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,12 +21,21 @@ pub enum JobType {
     Groth16,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Proof {
+    pub file_path: Option<String>,
+    pub blob: Vec<u8>
+}
+
 
 // maintain lifecycle of a job
 #[derive(Debug)]
 pub struct Job {
     // job id as specified by the client
-    pub base_id: String, 
+    pub base_id: String,
+
+    // job_id as we know it: base_id+item_id
+    pub id: String, 
 
     pub working_dir: String,
     
@@ -35,8 +44,9 @@ pub struct Job {
 
     pub status: Status,
 
-    pub proof_file_path: Option<String>,    
-
     pub job_type: JobType,
+
+    // result of the job
+    pub proof: Option<Proof>, 
 }
 

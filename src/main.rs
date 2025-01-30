@@ -166,6 +166,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     swarm.listen_on("/ip6/::/udp/20202/quic-v1".parse()?)?;
 
     let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
+    let mut timer_retry_proof_upload = stream::interval(Duration::from_secs(1 * 60)).fuse();
     let mut rng = thread_rng();
     loop {
         select! {
@@ -426,11 +427,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     prove_id.clone(),
                     job::Job {
                         base_id: prepared_prove_job.job_id,
+                        id: prove_id.clone(),
                         working_dir: prepared_prove_job.working_dir,
                         owner: prepared_prove_job.owner,
                         status: job::Status::Running,
-                        proof_file_path: None,
                         job_type: job::JobType::Prove(prepared_prove_job.segment_id),
+                        proof: None,
                     },
                 );
                 // run it
@@ -452,15 +454,31 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     continue;
                 }
                 let res = er.unwrap();
-                let job = jobs.get(&res.job_id).unwrap();                
-                println!("[info] Prove finished for `{}`, let's upload the proof.", res.job_id);
+                let job = jobs.get_mut(&res.job_id).unwrap();                
+                println!("[info] `prove` is finished for `{}`, let's upload the proof.", res.job_id);
+                // save to disk
+                let proof_file_path = format!("{}/proof", job.working_dir);
+                if let Err(e) = fs::write(
+                    &proof_file_path,
+                    &res.blob
+                ) {
+                    eprintln!("[warn] Failed to save proof to disk: `{e:?}`, path: `{proof_file_path}`");
+                    job.proof = Some(job::Proof {
+                        file_path: None,
+                        blob: res.blob.clone() //@ copying 230kb is inefficient
+                    });
+                    continue;
+                }                
+                job.proof = Some(job::Proof {
+                    file_path: Some(proof_file_path.clone()),
+                    blob: res.blob.clone() //@ copying 230kb is inefficient
+                });
                 proof_upload_futures.push(
                     upload_proof(
                         &ds_client,
                         &ds_key,
-                        job.working_dir.clone(),
-                        res.job_id.clone(),
-                        res.blob, //@ copying 230kb is inefficient
+                        res.job_id,
+                        proof_file_path, 
                     )
                 );
             },
@@ -484,10 +502,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     join_id.clone(),
                     job::Job {
                         base_id: prepared_join_job.job_id,
+                        id: join_id.clone(),
                         working_dir: prepared_join_job.working_dir,
                         owner: prepared_join_job.owner,
                         status: job::Status::Running,
-                        proof_file_path: None,
+                        proof: None,
                         job_type: job::JobType::Join(
                             prepared_join_job.left_proof_cid,
                             prepared_join_job.right_proof_cid
@@ -513,17 +532,33 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     continue;
                 }
                 let res = er.unwrap();
-                let job = jobs.get(&res.job_id).unwrap();
-                println!("[info] Join finished for `{}`, let's upload the proof.", res.job_id);
+                let job = jobs.get_mut(&res.job_id).unwrap();                
+                println!("[info] `join` is finished for `{}`, let's upload the proof.", res.job_id);
+                // save to disk
+                let proof_file_path = format!("{}/proof", job.working_dir);
+                if let Err(e) = fs::write(
+                    &proof_file_path,
+                    &res.blob
+                ) {
+                    eprintln!("[warn] Failed to save proof to disk: `{e:?}`, path: `{proof_file_path}`");
+                    job.proof = Some(job::Proof {
+                        file_path: None,
+                        blob: res.blob.clone() //@ copying 230kb is inefficient
+                    });
+                    continue;
+                }                
+                job.proof = Some(job::Proof {
+                    file_path: Some(proof_file_path.clone()),
+                    blob: res.blob.clone() //@ copying 230kb is inefficient
+                });
                 proof_upload_futures.push(
                     upload_proof(
                         &ds_client,
                         &ds_key,
-                        job.working_dir.clone(),
-                        res.job_id.clone(),
-                        res.blob,
+                        res.job_id,
+                        proof_file_path, 
                     )
-                );                            
+                );                     
             },
 
             // groth16 job is ready to start
@@ -540,10 +575,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     groth16_id.clone(),
                     job::Job {
                         base_id: prepared_groth16_job.job_id,
+                        id: groth16_id.clone(),
                         working_dir: prepared_groth16_job.working_dir,
                         owner: prepared_groth16_job.owner,
                         status: job::Status::Running,
-                        proof_file_path: None,
+                        proof: None,
                         job_type: job::JobType::Groth16,
                     },
                 );
@@ -567,11 +603,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 }
                 let res = er.unwrap();
                 let job = jobs.get_mut(&res.job_id).unwrap();                
-                println!("[info] Groth16 extraction is finished for `{}`, let's upload the proof.", res.job_id);
+                job.proof = Some(job::Proof {
+                    file_path: None,
+                    blob: res.blob.clone()
+                });
                 const CUSTOM_ENGINE: engine::GeneralPurpose =
                     engine::GeneralPurpose::new(&alphabet::URL_SAFE, general_purpose::NO_PAD);
-                let b64_encoded_proof = CUSTOM_ENGINE.encode(res.blob);
+                let b64_encoded_proof = CUSTOM_ENGINE.encode(&res.blob);
                 job.status = job::Status::ExecutionSucceeded(b64_encoded_proof.clone());
+                println!("[info] `groth16` extraction is finished for `{}`.", res.job_id);
                 let _ = swarm
                     .behaviour_mut()
                     .req_resp
@@ -597,14 +637,18 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             failure.err_msg
                         );
                         let job = jobs.get_mut(&failure.job_id).unwrap();
-                        job.status = job::Status::UploadFailed(failure.err_msg);
+                        job.status = match job.status {
+                            job::Status::UploadFailed(attempts) => 
+                                job::Status::UploadFailed(attempts + 1),
 
+                            _ =>
+                                job::Status::UploadFailed(0u32)
+                        };                            
                     },
 
                     Ok(uploaded)=> {
                         let job = jobs.get_mut(&uploaded.job_id).unwrap();
-                        job.proof_file_path = Some(uploaded.proof_file_path);
-                        job.status = job::Status::ExecutionSucceeded(uploaded.proof_cid.clone());
+                        job.status = job::Status::ExecutionSucceeded(uploaded.cid.clone());
                         let proof_type = match &job.job_type {
                             job::JobType::Prove(segment_id) => 
                                 protocol::ProofType::ProveAndLift(*segment_id),
@@ -623,13 +667,38 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     protocol::Proof {
                                         job_id: job.base_id.clone(),
                                         proof_type: proof_type,
-                                        cid: uploaded.proof_cid
+                                        cid: uploaded.cid
                                     }
                                 ])
                             );
                     },
-
                 };
+            },
+
+            // retry failed uploads
+            () = timer_retry_proof_upload.select_next_some() => {
+                for retry_job in jobs
+                    .values()
+                    .filter(|j| 
+                        if let job::Status::UploadFailed(attempts) = j.status {
+                            // retry upload for up to an hour
+                            attempts <= 60
+                        } else {
+                            eprintln!("[warn] Job {} has more than 60 failed upload attempts.", j.id);
+                            false
+                        }
+                    )
+                {
+                    println!("[info] Join finished for `{}`, let's upload the proof.", retry_job.id);
+                    proof_upload_futures.push(
+                        upload_proof(
+                            &ds_client,
+                            &ds_key,
+                            retry_job.id.clone(),
+                            retry_job.proof.as_ref().unwrap().file_path.clone().unwrap(),
+                        )
+                    ); 
+                }
             },
         }
     }
@@ -791,13 +860,9 @@ async fn prepare_groth16_job(
 
 #[derive(Debug, Clone)]
 struct UploadProof {
-
     job_id: String,
 
-    proof_file_path: String,
-
-    proof_cid: String,
-    
+    cid: String,    
 }
 
 #[derive(Debug, Clone)]
@@ -810,21 +875,9 @@ pub struct UploadProofFailure {
 async fn upload_proof(
     ds_client: &reqwest::Client,
     ds_key: &str,
-    working_dir: String,
     job_id: String,
-    proof_blob: Vec<u8>,
-) -> anyhow::Result<UploadProof, UploadProofFailure> {
-    // save to disk
-    let proof_file_path = format!("{working_dir}/proof");
-    let _bytes_written = fs::write(
-        &proof_file_path,
-        proof_blob
-    )
-    .map_err(|e| UploadProofFailure {
-        job_id: job_id.clone(),
-        err_msg: e.to_string()
-    })?; 
-    // upload
+    proof_file_path: String,
+) -> anyhow::Result<UploadProof, UploadProofFailure> {    
     lighthouse::upload_file(
         &ds_client,
         &ds_key,
@@ -834,8 +887,7 @@ async fn upload_proof(
     .and_then(|upload_res|
         Ok(UploadProof {
             job_id: job_id.clone(),
-            proof_file_path: proof_file_path,
-            proof_cid: upload_res.cid
+            cid: upload_res.cid
         })        
     )
     .map_err(|e| UploadProofFailure {
