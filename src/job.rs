@@ -1,4 +1,5 @@
 use libp2p::PeerId;
+use mongodb::bson::Bson;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Status {    
@@ -23,10 +24,9 @@ pub enum JobType {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Proof {
-    pub file_path: Option<String>,
+    pub filepath: Option<String>,
     pub blob: Vec<u8>
 }
-
 
 // maintain lifecycle of a job
 #[derive(Debug)]
@@ -47,6 +47,9 @@ pub struct Job {
     pub job_type: JobType,
 
     // result of the job
-    pub proof: Option<Proof>, 
+    pub proof: Option<Proof>,
+
+    // db oid
+    pub db_oid: Option<Bson>, 
 }
 

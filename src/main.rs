@@ -15,8 +15,9 @@ use std::{
     error::Error,
     time::Duration,
     collections::{
-        HashMap, 
+        HashMap 
     },
+    future::IntoFuture,
 };
 
 // use chrono::{DateTime, Utc};
@@ -39,6 +40,19 @@ use bit_vec::BitVec;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use base64::{Engine as _, engine::{self, general_purpose}, alphabet};
+use mongodb::{
+    bson,
+    bson::{
+        Bson,
+        doc,
+    },
+    options::{
+        ClientOptions,
+        ServerApi,
+        ServerApiVersion
+    },
+};
+
 use comms::{
     p2p::{ MyBehaviourEvent },
     protocol,
@@ -46,9 +60,9 @@ use comms::{
 };
 use dstorage::lighthouse;
 
-
 mod job;
 mod recursion;
+mod db;
 
 // CLI
 #[derive(Parser, Debug)]
@@ -91,6 +105,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
         .timeout(Duration::from_secs(60)) //@ how much timeout is enough?
         .build()?;
 
+    // setup mongodb
+    let db_client = mongodb_setup("mongodb://localhost:27017").await?;
+
     // let's maintain a list of jobs
     let mut jobs = HashMap::<String, job::Job>::new();
     // cids' download futures
@@ -104,6 +121,14 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     let mut groth16_execution_futures = FuturesUnordered::new();
 
     let mut proof_upload_futures = FuturesUnordered::new();
+
+    let col_proofs = db_client
+        .database("wholesum_prover")
+        .collection::<db::Proof>("proofs");
+    
+    // futures for mongodb progress saving 
+    let mut db_insert_futures = FuturesUnordered::new();
+    // let mut db_update_futures = FuturesUnordered::new();
     
     // key 
     let local_key = {
@@ -433,6 +458,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         status: job::Status::Running,
                         job_type: job::JobType::Prove(prepared_prove_job.segment_id),
                         proof: None,
+                        db_oid: None,
                     },
                 );
                 // run it
@@ -456,29 +482,51 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 let res = er.unwrap();
                 let job = jobs.get_mut(&res.job_id).unwrap();                
                 println!("[info] `prove` is finished for `{}`, let's upload the proof.", res.job_id);
+                // record to db                
+                let mut db_proof = db::Proof {
+                    client_job_id: job.base_id.clone(),
+                    job_id: job.id.clone(),
+                    job_type: db::JobType::Prove(
+                        if let job::JobType::Prove(seg_id) = job.job_type { seg_id } else { u32::MAX }
+                    ),
+                    owner: job.owner.to_string(),
+                    blob: res.blob.clone(),
+                    blob_filepath: None,
+                    blob_cid: None,
+                };
                 // save to disk
-                let proof_file_path = format!("{}/proof", job.working_dir);
+                let proof_filepath = format!("{}/proof", job.working_dir);
                 if let Err(e) = fs::write(
-                    &proof_file_path,
+                    &proof_filepath,
                     &res.blob
                 ) {
-                    eprintln!("[warn] Failed to save proof to disk: `{e:?}`, path: `{proof_file_path}`");
+                    eprintln!("[warn] Failed to save proof to disk: `{e:?}`, path: `{proof_filepath}`");
                     job.proof = Some(job::Proof {
-                        file_path: None,
+                        filepath: None,
                         blob: res.blob.clone() //@ copying 230kb is inefficient
                     });
+                    db_insert_futures.push(
+                        col_proofs
+                        .insert_one(db_proof)
+                        .into_future()
+                    ); 
                     continue;
                 }                
                 job.proof = Some(job::Proof {
-                    file_path: Some(proof_file_path.clone()),
+                    filepath: Some(proof_filepath.clone()),
                     blob: res.blob.clone() //@ copying 230kb is inefficient
                 });
+                db_proof.blob_filepath = Some(proof_filepath.clone());
+                db_insert_futures.push(
+                    col_proofs.insert_one(db_proof)
+                    .into_future()
+                );
                 proof_upload_futures.push(
                     upload_proof(
                         &ds_client,
                         &ds_key,
                         res.job_id,
-                        proof_file_path, 
+                        proof_filepath, 
                     )
                 );
             },
@@ -506,19 +554,20 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         working_dir: prepared_join_job.working_dir,
                         owner: prepared_join_job.owner,
                         status: job::Status::Running,
-                        proof: None,
                         job_type: job::JobType::Join(
                             prepared_join_job.left_proof_cid,
                             prepared_join_job.right_proof_cid
                         ),
+                        proof: None,
+                        db_oid: None,
                     }
                 );
                 // run it
                 join_execution_futures.push(
                     recursion::join(
                         join_id.clone(),
-                        prepared_join_job.left_proof_file_path.into(),
-                        prepared_join_job.right_proof_file_path.into()
+                        prepared_join_job.left_proof_filepath.into(),
+                        prepared_join_job.right_proof_filepath.into()
                     )
                 );             
             },
@@ -535,20 +584,20 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 let job = jobs.get_mut(&res.job_id).unwrap();                
                 println!("[info] `join` is finished for `{}`, let's upload the proof.", res.job_id);
                 // save to disk
-                let proof_file_path = format!("{}/proof", job.working_dir);
+                let proof_filepath = format!("{}/proof", job.working_dir);
                 if let Err(e) = fs::write(
-                    &proof_file_path,
+                    &proof_filepath,
                     &res.blob
                 ) {
-                    eprintln!("[warn] Failed to save proof to disk: `{e:?}`, path: `{proof_file_path}`");
+                    eprintln!("[warn] Failed to save proof to disk: `{e:?}`, path: `{proof_filepath}`");
                     job.proof = Some(job::Proof {
-                        file_path: None,
+                        filepath: None,
                         blob: res.blob.clone() //@ copying 230kb is inefficient
                     });
                     continue;
                 }                
                 job.proof = Some(job::Proof {
-                    file_path: Some(proof_file_path.clone()),
+                    filepath: Some(proof_filepath.clone()),
                     blob: res.blob.clone() //@ copying 230kb is inefficient
                 });
                 proof_upload_futures.push(
@@ -556,7 +605,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         &ds_client,
                         &ds_key,
                         res.job_id,
-                        proof_file_path, 
+                        proof_filepath, 
                     )
                 );                     
             },
@@ -579,15 +628,16 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         working_dir: prepared_groth16_job.working_dir,
                         owner: prepared_groth16_job.owner,
                         status: job::Status::Running,
-                        proof: None,
                         job_type: job::JobType::Groth16,
+                        proof: None,
+                        db_oid: None,
                     },
                 );
                 // run it
                 groth16_execution_futures.push(
                     recursion::to_groth16(
                         groth16_id,
-                        prepared_groth16_job.input_proof_file_path.into()
+                        prepared_groth16_job.input_proof_filepath.into()
                     )
                 );             
             },
@@ -604,7 +654,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 let res = er.unwrap();
                 let job = jobs.get_mut(&res.job_id).unwrap();                
                 job.proof = Some(job::Proof {
-                    file_path: None,
+                    filepath: None,
                     blob: res.blob.clone()
                 });
                 const CUSTOM_ENGINE: engine::GeneralPurpose =
@@ -695,22 +745,59 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             &ds_client,
                             &ds_key,
                             retry_job.id.clone(),
-                            retry_job.proof.as_ref().unwrap().file_path.clone().unwrap(),
+                            retry_job.proof.as_ref().unwrap().filepath.clone().unwrap(),
                         )
                     ); 
                 }
             },
+
+            res = db_insert_futures.select_next_some() => {
+                match res {
+                    Err(e) => eprintln!("[warn] DB insert was failed: `{:#?}`", e),
+
+                    Ok(oid) => println!("[info] DB insert was successful: `{:?}`", oid)
+                }                
+            },
+
+            // res = db_update_futures.select_next_some() => {
+            //     match res {
+            //         Err(e) => eprintln!("[warn] DB update was failed: `{:#?}`", e),
+
+            //         Ok(oid) => println!("[info] DB update was successful: `{:?}`", oid)
+            //     } 
+            // },
         }
     }
 }
 
-pub fn get_home_dir() -> anyhow::Result<String> {
+fn get_home_dir() -> anyhow::Result<String> {
     let err_msg = "Home dir is not available";
     let binding = home::home_dir()
         .ok_or_else(|| anyhow::Error::msg(err_msg))?;
     let home_dir = binding.to_str()
         .ok_or_else(|| anyhow::Error::msg(err_msg))?;
     Ok(home_dir.to_string())
+}
+
+async fn mongodb_setup(
+    uri: &str,
+) -> anyhow::Result<mongodb::Client> {
+    println!("[info] Connecting to the MongoDB daemon...");
+    let mut client_options = ClientOptions::parse(
+        uri
+    ).await?;
+    let server_api = ServerApi::builder().version(
+        ServerApiVersion::V1
+    ).build();
+    client_options.server_api = Some(server_api);
+    let client = mongodb::Client::with_options(client_options)?;
+    // Send a ping to confirm a successful connection
+    client
+        .database("admin")
+        .run_command(doc! { "ping": 1 })
+        .await?;
+    println!("[info] Successfully connected to the MongoDB instance!");
+    Ok(client)
 }
 
 #[derive(Debug, Clone)]
@@ -768,10 +855,10 @@ struct PreparedJoinJob {
     owner: PeerId,
     
     left_proof_cid: String,
-    left_proof_file_path: String,
+    left_proof_filepath: String,
 
     right_proof_cid: String,
-    right_proof_file_path: String,
+    right_proof_filepath: String,
 
     working_dir: String,
 }
@@ -793,26 +880,26 @@ async fn prepare_join_job(
         right_proof_cid
     );
     fs::create_dir_all(working_dir.clone())?;
-    let left_proof_file_path = format!("{working_dir}/left");
+    let left_proof_filepath = format!("{working_dir}/left");
     lighthouse::download_file(
         ds_client,
         &left_proof_cid,
-        left_proof_file_path.clone()
+        left_proof_filepath.clone()
     ).await?;
-    let right_proof_file_path = format!("{working_dir}/right");
+    let right_proof_filepath = format!("{working_dir}/right");
     lighthouse::download_file(
         ds_client,
         &right_proof_cid,
-        right_proof_file_path.clone()
+        right_proof_filepath.clone()
     ).await?;
     
     Ok(PreparedJoinJob {
         job_id: job_id.clone(),
         owner: owner,
         left_proof_cid: left_proof_cid,
-        left_proof_file_path: left_proof_file_path,
+        left_proof_filepath: left_proof_filepath,
         right_proof_cid: right_proof_cid,
-        right_proof_file_path: right_proof_file_path,
+        right_proof_filepath: right_proof_filepath,
         working_dir: working_dir
     })
 }
@@ -826,7 +913,7 @@ struct PreparedGroth16Job {
     
     owner: PeerId,
     
-    input_proof_file_path: String,
+    input_proof_filepath: String,
 }
 
 // set up prove job for execution:
@@ -843,18 +930,18 @@ async fn prepare_groth16_job(
         job_id,
     );
     fs::create_dir_all(working_dir.clone())?;
-    let input_proof_file_path = format!("{working_dir}/input_proof");
+    let input_proof_filepath = format!("{working_dir}/input_proof");
     lighthouse::download_file(
         ds_client,
         &input_proof_cid,
-        input_proof_file_path.clone()
+        input_proof_filepath.clone()
     ).await?;
     
     Ok(PreparedGroth16Job {
         job_id: job_id.clone(),
         working_dir: working_dir,
         owner: owner,
-        input_proof_file_path: input_proof_file_path
+        input_proof_filepath: input_proof_filepath
     })
 }
 
@@ -876,12 +963,12 @@ async fn upload_proof(
     ds_client: &reqwest::Client,
     ds_key: &str,
     job_id: String,
-    proof_file_path: String,
+    proof_filepath: String,
 ) -> anyhow::Result<UploadProof, UploadProofFailure> {    
     lighthouse::upload_file(
         &ds_client,
         &ds_key,
-        proof_file_path.clone(),
+        proof_filepath.clone(),
         format!("{job_id}-proof")
     ).await
     .and_then(|upload_res|
