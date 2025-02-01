@@ -41,7 +41,6 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use base64::{Engine as _, engine::{self, general_purpose}, alphabet};
 use mongodb::{
-    bson,
     bson::{
         Bson,
         doc,
@@ -128,7 +127,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     
     // futures for mongodb progress saving 
     let mut db_insert_futures = FuturesUnordered::new();
-    // let mut db_update_futures = FuturesUnordered::new();
+    let mut db_update_futures = FuturesUnordered::new();
     
     // key 
     let local_key = {
@@ -494,7 +493,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     blob_filepath: None,
                     blob_cid: None,
                 };
-                // save to disk
+                // save proof to disk
                 let proof_filepath = format!("{}/proof", job.working_dir);
                 if let Err(e) = fs::write(
                     &proof_filepath,
@@ -505,11 +504,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         filepath: None,
                         blob: res.blob.clone() //@ copying 230kb is inefficient
                     });
-                    db_insert_futures.push(
-                        col_proofs
-                        .insert_one(db_proof)
-                        .into_future()
-                    ); 
+                    match col_proofs.insert_one(db_proof).await {
+                        Ok(inserted_id) => {
+                            println!("[info] DB insert was successful: `{:?}`", inserted_id);
+                        },
+
+                        Err(e) => {
+                            eprintln!("[warn] DB insert was failed: `{e:?}`");
+                        }
+                    };
                     continue;
                 }                
                 job.proof = Some(job::Proof {
@@ -518,8 +521,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 });
                 db_proof.blob_filepath = Some(proof_filepath.clone());
                 db_insert_futures.push(
-                    col_proofs.insert_one(db_proof)
-                    .into_future()
+                    insert_into_db(&col_proofs, db_proof)
                 );
                 proof_upload_futures.push(
                     upload_proof(
@@ -583,7 +585,19 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 let res = er.unwrap();
                 let job = jobs.get_mut(&res.job_id).unwrap();                
                 println!("[info] `join` is finished for `{}`, let's upload the proof.", res.job_id);
-                // save to disk
+                // record to db                
+                let mut db_proof = db::Proof {
+                    client_job_id: job.base_id.clone(),
+                    job_id: job.id.clone(),
+                    job_type: db::JobType::Prove(
+                        if let job::JobType::Prove(seg_id) = job.job_type { seg_id } else { u32::MAX }
+                    ),
+                    owner: job.owner.to_string(),
+                    blob: res.blob.clone(),
+                    blob_filepath: None,
+                    blob_cid: None,
+                };
+                // save proof to disk
                 let proof_filepath = format!("{}/proof", job.working_dir);
                 if let Err(e) = fs::write(
                     &proof_filepath,
@@ -594,12 +608,25 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         filepath: None,
                         blob: res.blob.clone() //@ copying 230kb is inefficient
                     });
+                    match col_proofs.insert_one(db_proof).await {
+                        Ok(inserted_id) => {
+                            println!("[info] DB insert was successful: `{:?}`", inserted_id);
+                        },
+
+                        Err(e) => {
+                            eprintln!("[warn] DB insert was failed: `{e:?}`");
+                        }
+                    };
                     continue;
                 }                
                 job.proof = Some(job::Proof {
                     filepath: Some(proof_filepath.clone()),
                     blob: res.blob.clone() //@ copying 230kb is inefficient
                 });
+                db_proof.blob_filepath = Some(proof_filepath.clone());
+                db_insert_futures.push(
+                    insert_into_db(&col_proofs, db_proof)
+                );
                 proof_upload_futures.push(
                     upload_proof(
                         &ds_client,
@@ -652,16 +679,43 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     continue;
                 }
                 let res = er.unwrap();
-                let job = jobs.get_mut(&res.job_id).unwrap();                
-                job.proof = Some(job::Proof {
-                    filepath: None,
-                    blob: res.blob.clone()
-                });
+                let job = jobs.get_mut(&res.job_id).unwrap();
+                println!("[info] `groth16` extraction is finished for `{}`.", res.job_id);
+                // record to db                
+                let mut db_proof = db::Proof {
+                    client_job_id: job.base_id.clone(),
+                    job_id: job.id.clone(),
+                    job_type: db::JobType::Prove(
+                        if let job::JobType::Prove(seg_id) = job.job_type { seg_id } else { u32::MAX }
+                    ),
+                    owner: job.owner.to_string(),
+                    blob: res.blob.clone(),
+                    blob_filepath: None,
+                    blob_cid: None,
+                };
+                // save proof to disk
+                let proof_filepath = format!("{}/proof", job.working_dir);
+                if let Err(e) = fs::write(
+                    &proof_filepath,
+                    &res.blob
+                ) {
+                    eprintln!("[warn] Failed to save proof to disk: `{e:?}`, path: `{proof_filepath}`");
+                    job.proof = Some(job::Proof {
+                        filepath: None,
+                        blob: res.blob.clone() //@ copying 230kb is inefficient
+                    });
+                } else {
+                    job.proof = Some(job::Proof {
+                        filepath: Some(proof_filepath.clone()),
+                        blob: res.blob.clone()
+                    });
+                    db_proof.blob_filepath = Some(proof_filepath.clone());
+                }
                 const CUSTOM_ENGINE: engine::GeneralPurpose =
                     engine::GeneralPurpose::new(&alphabet::URL_SAFE, general_purpose::NO_PAD);
                 let b64_encoded_proof = CUSTOM_ENGINE.encode(&res.blob);
                 job.status = job::Status::ExecutionSucceeded(b64_encoded_proof.clone());
-                println!("[info] `groth16` extraction is finished for `{}`.", res.job_id);
+                db_proof.blob_cid = Some(b64_encoded_proof.clone());
                 let _ = swarm
                     .behaviour_mut()
                     .req_resp
@@ -675,6 +729,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             }
                         ])
                     );
+                db_insert_futures.push(
+                    insert_into_db(&col_proofs, db_proof)
+                );
             },
 
             // proof upload is ready
@@ -717,10 +774,29 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     protocol::Proof {
                                         job_id: job.base_id.clone(),
                                         proof_type: proof_type,
-                                        cid: uploaded.cid
+                                        cid: uploaded.cid.clone()
                                     }
                                 ])
                             );
+                        // update db
+                        if let Some(oid) = &job.db_oid {
+                            db_update_futures.push(
+                                col_proofs.update_one(
+                                    doc! {
+                                        "_id": oid.clone()
+                                    },
+                                    doc! {
+                                        "$set": doc! {
+                                            "blob_cid": Some(uploaded.cid),
+                                        }
+                                    }
+                                )
+                                .into_future()
+                            );
+                        } else {
+                            eprintln!("[warn] No record on db to update proof's cid.");
+                        }
+
                     },
                 };
             },
@@ -753,19 +829,33 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
             res = db_insert_futures.select_next_some() => {
                 match res {
-                    Err(e) => eprintln!("[warn] DB insert was failed: `{:#?}`", e),
+                    Ok(db_insert_result) => {
+                        println!(
+                            "[info] DB insert was successful for `{}`: `{:?}`",
+                            db_insert_result.job_id,
+                            db_insert_result.inserted_id
+                        );
+                        let job = jobs.get_mut(&db_insert_result.job_id).unwrap();
+                        job.db_oid = Some(db_insert_result.inserted_id);
+                    },
 
-                    Ok(oid) => println!("[info] DB insert was successful: `{:?}`", oid)
+                    Err(db_insert_error) => {
+                        eprintln!(
+                            "[warn] DB insert was failed for `{}`: `{:?}`",
+                            db_insert_error.job_id,
+                            db_insert_error.err_msg
+                        );
+                    },
                 }                
             },
 
-            // res = db_update_futures.select_next_some() => {
-            //     match res {
-            //         Err(e) => eprintln!("[warn] DB update was failed: `{:#?}`", e),
+            res = db_update_futures.select_next_some() => {
+                match res {
+                    Err(e) => eprintln!("[warn] DB update was failed: `{:#?}`", e),
 
-            //         Ok(oid) => println!("[info] DB update was successful: `{:?}`", oid)
-            //     } 
-            // },
+                    Ok(oid) => println!("[info] DB update was successful: `{:?}`", oid)
+                } 
+            },
         }
     }
 }
@@ -981,4 +1071,42 @@ async fn upload_proof(
         job_id: job_id.clone(),
         err_msg: e.to_string()
     })    
+}
+
+#[derive(Debug, Clone)]
+struct DBInsertResult {
+    job_id: String,
+
+    inserted_id: Bson,    
+}
+
+#[derive(Debug, Clone)]
+struct DBInsertError {
+    job_id: String,
+
+    err_msg: String,    
+}
+
+async fn insert_into_db(
+    col_proofs: &mongodb::Collection<db::Proof>,
+    db_proof: db::Proof
+) -> anyhow::Result<DBInsertResult, DBInsertError> {
+    let job_id = db_proof.job_id.clone();
+    col_proofs
+    .insert_one(db_proof)
+    .await
+    .and_then(|insert_result| 
+        Ok(
+            DBInsertResult {
+                job_id: job_id.clone(),
+                inserted_id: insert_result.inserted_id
+            }
+        )
+    )
+    .map_err(|e|
+        DBInsertError {        
+            job_id: job_id,
+            err_msg: e.to_string()
+        }
+    )
 }

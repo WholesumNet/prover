@@ -1,4 +1,3 @@
-use mongodb::bson::Bson;
 use serde::{
     Serialize, Deserialize
 };
