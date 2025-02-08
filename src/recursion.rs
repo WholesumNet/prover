@@ -19,7 +19,7 @@ use std::{
     time::{Instant},
     collections::BTreeMap,
 };
-
+use log::info;
 use anyhow;
 
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ pub async fn prove_and_lift(
     job_id: String,
     seg_path: PathBuf
 ) -> Result<ExecutionResult, ExecutionError> {
-    println!("[info] Proving segment `{job_id}`...");
+    info!("Proving segment `{job_id}`...");
     ApiClient::from_env()
     .and_then(|r0_client| {   
         let now = Instant::now();      
@@ -75,7 +75,7 @@ pub async fn prove_and_lift(
                     asset.as_bytes()?.into()
                 };
                 let prove_dur = now.elapsed().as_secs();
-                println!("[info](DUR) prove took `{prove_dur} secs`.");  
+                info!("prove took `{prove_dur} secs`.");  
                 Ok(ExecutionResult {
                     job_id: job_id.clone(),
                     blob: blob
@@ -94,7 +94,7 @@ pub async fn join(
     left_sr_path: PathBuf,
     right_sr_path: PathBuf,
 ) -> Result<ExecutionResult, ExecutionError> {
-    println!("[info] Joining proofs `{job_id}`...", );
+    info!("Joining proofs `{job_id}`...", );
     ApiClient::from_env()
     .and_then(|r0_client| {
         let now = Instant::now();     
@@ -112,7 +112,7 @@ pub async fn join(
                 asset.as_bytes()?.into()
             };
             let join_dur = now.elapsed().as_secs();
-            println!("[info](DUR) join took `{join_dur} secs`.");  
+            info!("`join` took `{join_dur} secs`.");  
             Ok(ExecutionResult {
                 job_id: job_id.clone(),
                 blob: blob
@@ -131,7 +131,7 @@ pub async fn to_groth16(
 ) -> anyhow::Result<ExecutionResult, ExecutionError> {
     ApiClient::from_env()
     .and_then(|r0_client| {
-        println!("[info] Transforming proof via identity_p254 `{job_id}`...");
+        info!("Transforming proof via identity_p254 `{job_id}`...");
         let now = Instant::now();
         // 1. transform via identity_p254
         r0_client
@@ -142,7 +142,7 @@ pub async fn to_groth16(
         )
         .and_then(|p254_receipt| {
             let dur = now.elapsed().as_secs();
-            println!("[info](DUR) identity_p254 took `{dur} secs`");
+            info!("`identity_p254` took `{dur} secs`");
 
             let verifier_parameters = SuccinctReceiptVerifierParameters {
                 control_root: MerkleGroup::new(vec![BN254_IDENTITY_CONTROL_ID])?
@@ -163,7 +163,7 @@ pub async fn to_groth16(
         .and_then(|p254_receipt| {
             // 2. extract the compressed snark(Groth16)
             let asset: Asset = p254_receipt.try_into()?;
-            println!("[info] compressing the p254 proof to get a groth16 proof...`");    
+            info!("compressing the p254 proof to get a groth16 proof...`");    
             let now = Instant::now();    
             let groth16_receipt = r0_client
                 .compress(
@@ -172,7 +172,7 @@ pub async fn to_groth16(
                     AssetRequest::Inline,
                 )?;
             let dur = now.elapsed().as_secs();
-            println!("[info](DUR) compress took `{dur} secs`");
+            info!("`compress` took `{dur} secs`");
             let blob: Vec<u8> = {
                 let asset: Asset = groth16_receipt.try_into()?;
                 asset.as_bytes()?.into()

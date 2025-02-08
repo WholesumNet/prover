@@ -20,6 +20,8 @@ use std::{
     future::IntoFuture,
 };
 
+use env_logger::Env;
+use log::{info, warn, error};
 // use chrono::{DateTime, Utc};
 
 use clap::Parser;
@@ -31,8 +33,6 @@ use libp2p::{
     swarm::{SwarmEvent},
     PeerId,
 };
-
-use tracing_subscriber::EnvFilter;
 
 // use uuid::Uuid;
 use anyhow;
@@ -85,12 +85,11 @@ struct Cli {
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error + 'static>> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .init();
     let cli = Cli::parse();
-    println!("<-> `Prover` agent for Wholesum network <->");
-    println!("Operating mode: `{}` network",
+    info!("<-> `Prover` agent for Wholesum network <->");
+    info!("Operating mode: `{}` network",
         if false == cli.dev { "global" } else { "local(development)" }
     ); 
     
@@ -139,11 +138,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             let new_key = identity::Keypair::generate_ed25519();
             let bytes = new_key.to_protobuf_encoding().unwrap();
             let _bw = std::fs::write("./key.secret", bytes);
-            println!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./key.secret");
+            warn!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./key.secret");
             new_key
         }
     };    
-    println!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
+    info!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
 
     // Libp2p swarm 
     let mut swarm = comms::p2p::setup_swarm(&local_key).await?;
@@ -171,10 +170,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 .behaviour_mut()
                 .kademlia
                 .bootstrap() {
-            eprintln!("[warn] Failed to bootstrap Kademlia: `{:?}`", e);
+            warn!("Failed to bootstrap Kademlia: `{:?}`", e);
 
         } else {
-            println!("[info] Self-bootstraping is initiated.");
+            info!("Self-bootstraping is initiated.");
         }
     }
 
@@ -200,7 +199,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     continue;
                 }
                 let random_peer_id = PeerId::random();
-                println!("Searching for the closest peers to `{random_peer_id}`");
+                info!("Searching for the closest peers to `{random_peer_id}`");
                 swarm
                     .behaviour_mut()
                     .kademlia
@@ -210,7 +209,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // libp2p events
             event = swarm.select_next_some() => match event {
                 SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("[info] Local node is listening on {address}");
+                    info!("Local node is listening on {address}");
                 },
 
                 // mdns events
@@ -220,7 +219,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     )
                 ) => {
                     for (peer_id, _multiaddr) in list {
-                        println!("[info] mDNS discovered a new peer: {peer_id}");
+                        info!("mDNS discovered a new peer: {peer_id}");
                         swarm
                             .behaviour_mut()
                             .gossipsub
@@ -234,7 +233,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     )
                 ) => {
                     for (peer_id, _multiaddr) in list {
-                        println!("[info] mDNS discovered peer has expired: {peer_id}");
+                        info!("mDNS discovered peer has expired: {peer_id}");
                         swarm
                             .behaviour_mut()
                             .gossipsub
@@ -252,7 +251,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         }
                     )
                 ) => {
-                    // println!("[info] Inbound identify event `{:#?}`", info);
+                    // info!("Inbound identify event `{:#?}`", info);
                     if false == cli.dev {
                         for addr in info.listen_addrs {
                             // if false == addr.iter().any(|item| item == &"127.0.0.1" || item == &"::1"){
@@ -273,7 +272,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 })) => {
                     let need: Need = match bincode::deserialize(&message.data) {
                         Err(e) => {
-                            eprintln!("[warn] Gossip(need) message decode error: `{e:?}`");
+                            warn!("Gossip(need) message decode error: `{e:?}`");
                             continue;
                         },
 
@@ -283,7 +282,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         Need::Compute(compute_job) => {
                             match compute_job.job_type {
                                 JobType::ProveAndLift(prove_details) => {
-                                    println!("[info] New prove job from `{peer_id}`: `{prove_details:#?}`");
                                     let mut progress_map = BitVec::from_bytes(&prove_details.progress_map);
                                     progress_map.truncate(prove_details.num_segments.try_into().unwrap());
                                     let mut unproved_segments = vec![];
@@ -302,11 +300,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         }                                                                                   
                                     }
                                     if unproved_segments.len() == 0 {
-                                        println!("[warn] No more segments to prove.");
+                                        warn!("No more segments to prove.");
                                         continue;
                                     }
                                     let chosen_segment = *unproved_segments.choose(&mut rng).unwrap() as u32;
-                                    println!("[info] Picked `segment {chosen_segment}` to prove.");
+                                    info!("New prove request, picked `segment {chosen_segment}` to prove.");
                                     prepare_prove_job_futures.push(
                                         prepare_prove_job(
                                             &ds_client,
@@ -324,7 +322,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 },
     
                                 JobType::Join(join_details) => {
-                                    println!("[info] New join job from `{peer_id}`: `{join_details:#?}`");
+                                    info!("New join job from `{peer_id}`: `{join_details:#?}`");
                                     let mut progress_map = BitVec::from_bytes(&join_details.progress_map);
                                     progress_map.truncate(join_details.pairs.len());
                                     let mut unproved_pairs = vec![];
@@ -351,11 +349,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         } 
                                     }
                                     if unproved_pairs.len() == 0 {
-                                        println!("[warn] No unproved pairs to join.");
+                                        warn!("No unproved pairs to join.");
                                         continue;
                                     }
                                     let choosen_pair = *unproved_pairs.choose(&mut rng).unwrap();
-                                    println!("[info] Picked `pair {choosen_pair:?}` to join.");
+                                    info!("Picked `pair {choosen_pair:?}` to join.");
                                     prepare_join_job_futures.push(
                                         prepare_join_job(
                                             &ds_client,
@@ -368,7 +366,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 },
 
                                 JobType::Groth16(groth16_details) => {
-                                    println!("[info] New groth16 job from `{peer_id}`: `{groth16_details:#?}`");
+                                    info!("New groth16 job from `{peer_id}`: `{groth16_details:#?}`");
                                     if jobs.contains_key(&format!("{}-g16", compute_job.job_id)) {
                                         continue;
                                     }                                                                        
@@ -436,7 +434,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // prove job is ready to start
             prep_res = prepare_prove_job_futures.select_next_some() => {
                 if let Err(failed) = prep_res {
-                    eprintln!("[warn] Failed to prepare prove job: `{:#?}`", failed);
+                    warn!("Failed to prepare prove job: `{:#?}`", failed);
                     //@ wtd here?
                     continue;
                 }
@@ -472,7 +470,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // prove job is finished
             er = prove_execution_futures.select_next_some() => {                
                 if let Err(failed) = er {
-                    eprintln!("[warn] Failed to run the prove job: `{:#?}`", failed);       
+                    warn!("Failed to run the prove job: `{:#?}`", failed);       
                     //@ wtd with job?
                     let job = jobs.get_mut(&failed.job_id).unwrap();
                     job.status = job::Status::ExecutionFailed(failed.err_msg);
@@ -480,7 +478,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 }
                 let res = er.unwrap();
                 let job = jobs.get_mut(&res.job_id).unwrap();                
-                println!("[info] `prove` is finished for `{}`, let's upload the proof.", res.job_id);
+                info!("`prove` is finished for `{}`, let's upload the proof.", res.job_id);
                 // record to db                
                 let mut db_proof = db::Proof {
                     client_job_id: job.base_id.clone(),
@@ -499,18 +497,18 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     &proof_filepath,
                     &res.blob
                 ) {
-                    eprintln!("[warn] Failed to save proof to disk: `{e:?}`, path: `{proof_filepath}`");
+                    warn!("Failed to save proof to disk: `{e:?}`, path: `{proof_filepath}`");
                     job.proof = Some(job::Proof {
                         filepath: None,
                         blob: res.blob.clone() //@ copying 230kb is inefficient
                     });
                     match col_proofs.insert_one(db_proof).await {
                         Ok(inserted_id) => {
-                            println!("[info] DB insert was successful: `{:?}`", inserted_id);
+                            info!("DB insert was successful: `{:?}`", inserted_id);
                         },
 
                         Err(e) => {
-                            eprintln!("[warn] DB insert was failed: `{e:?}`");
+                            warn!("DB insert was failed: `{e:?}`");
                         }
                     };
                     continue;
@@ -536,7 +534,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // join job is ready to start
             prep_res = prepare_join_job_futures.select_next_some() => {
                 if let Err(failed) = prep_res {
-                    eprintln!("[warn] Failed to prepare join job: `{:#?}`", failed);
+                    warn!("Failed to prepare join job: `{:#?}`", failed);
                     //@ wtd here?
                     continue;
                 }
@@ -577,14 +575,14 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // join job is finished
             er = join_execution_futures.select_next_some() => {
                 if let Err(failed) = er {
-                    eprintln!("[warn] Failed to run the join job: `{:#?}`", failed);       
+                    warn!("Failed to run the join job: `{:#?}`", failed);       
                     let job = jobs.get_mut(&failed.job_id).unwrap();
                     job.status = job::Status::ExecutionFailed(failed.err_msg);
                     continue;
                 }
                 let res = er.unwrap();
                 let job = jobs.get_mut(&res.job_id).unwrap();                
-                println!("[info] `join` is finished for `{}`, let's upload the proof.", res.job_id);
+                info!("`join` is finished for `{}`, let's upload the proof.", res.job_id);
                 // record to db                
                 let mut db_proof = db::Proof {
                     client_job_id: job.base_id.clone(),
@@ -603,18 +601,18 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     &proof_filepath,
                     &res.blob
                 ) {
-                    eprintln!("[warn] Failed to save proof to disk: `{e:?}`, path: `{proof_filepath}`");
+                    warn!("Failed to save proof to disk: `{e:?}`, path: `{proof_filepath}`");
                     job.proof = Some(job::Proof {
                         filepath: None,
                         blob: res.blob.clone() //@ copying 230kb is inefficient
                     });
                     match col_proofs.insert_one(db_proof).await {
                         Ok(inserted_id) => {
-                            println!("[info] DB insert was successful: `{:?}`", inserted_id);
+                            info!("DB insert was successful: `{:?}`", inserted_id);
                         },
 
                         Err(e) => {
-                            eprintln!("[warn] DB insert was failed: `{e:?}`");
+                            warn!("DB insert was failed: `{e:?}`");
                         }
                     };
                     continue;
@@ -640,7 +638,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // groth16 job is ready to start
             prep_res = prepare_groth16_job_futures.select_next_some() => {
                 if let Err(failed) = prep_res {
-                    eprintln!("[warn] Failed to prepare groth16 job: `{:#?}`", failed);
+                    warn!("Failed to prepare groth16 job: `{:#?}`", failed);
                     //@ wtd here?
                     continue;
                 }
@@ -672,7 +670,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             // groth16 job is finished
             er = groth16_execution_futures.select_next_some() => {                
                 if let Err(failed) = er {
-                    eprintln!("[warn] Failed to run the groth16 job: `{:#?}`", failed);       
+                    warn!("Failed to run the groth16 job: `{:#?}`", failed);       
                     //@ wtd with job?
                     let job = jobs.get_mut(&failed.job_id).unwrap();
                     job.status = job::Status::ExecutionFailed(failed.err_msg);
@@ -680,7 +678,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 }
                 let res = er.unwrap();
                 let job = jobs.get_mut(&res.job_id).unwrap();
-                println!("[info] `groth16` extraction is finished for `{}`.", res.job_id);
+                info!("`groth16` extraction is finished for `{}`.", res.job_id);
                 // record to db                
                 let mut db_proof = db::Proof {
                     client_job_id: job.base_id.clone(),
@@ -699,7 +697,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     &proof_filepath,
                     &res.blob
                 ) {
-                    eprintln!("[warn] Failed to save proof to disk: `{e:?}`, path: `{proof_filepath}`");
+                    warn!("Failed to save proof to disk: `{e:?}`, path: `{proof_filepath}`");
                     job.proof = Some(job::Proof {
                         filepath: None,
                         blob: res.blob.clone() //@ copying 230kb is inefficient
@@ -738,8 +736,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             upload_res = proof_upload_futures.select_next_some() => {
                 match upload_res {
                     Err(failure) => {
-                        eprintln!(
-                            "[warn] Proof upload failed for `{}`: `{:#?}`",
+                        warn!(
+                            "Proof upload failed for `{}`: `{:#?}`",
                             failure.job_id,
                             failure.err_msg
                         );
@@ -749,7 +747,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 job::Status::UploadFailed(attempts + 1),
 
                             _ =>
-                                job::Status::UploadFailed(0u32)
+                                job::Status::UploadFailed(1u32)
                         };                            
                     },
 
@@ -794,7 +792,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 .into_future()
                             );
                         } else {
-                            eprintln!("[warn] No record on db to update proof's cid.");
+                            warn!("No record on db to update proof's cid.");
                         }
 
                     },
@@ -805,17 +803,19 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             () = timer_retry_proof_upload.select_next_some() => {
                 for retry_job in jobs
                     .values()
-                    .filter(|j| 
+                    .filter(|j| {
                         if let job::Status::UploadFailed(attempts) = j.status {
                             // retry upload for up to an hour
+                            if attempts > 60 {
+                                warn!("Job {} has more than 60 failed upload attempts.", j.id);
+                            }
                             attempts <= 60
                         } else {
-                            eprintln!("[warn] Job {} has more than 60 failed upload attempts.", j.id);
                             false
                         }
-                    )
+                    })
                 {
-                    println!("[info] Join finished for `{}`, let's upload the proof.", retry_job.id);
+                    info!("Retrying upload for `{}`...", retry_job.id);
                     proof_upload_futures.push(
                         upload_proof(
                             &ds_client,
@@ -830,8 +830,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             res = db_insert_futures.select_next_some() => {
                 match res {
                     Ok(db_insert_result) => {
-                        println!(
-                            "[info] DB insert was successful for `{}`: `{:?}`",
+                        info!(
+                            "DB insert was successful for `{}`: `{:?}`",
                             db_insert_result.job_id,
                             db_insert_result.inserted_id
                         );
@@ -840,8 +840,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     },
 
                     Err(db_insert_error) => {
-                        eprintln!(
-                            "[warn] DB insert was failed for `{}`: `{:?}`",
+                        warn!(
+                            "DB insert was failed for `{}`: `{:?}`",
                             db_insert_error.job_id,
                             db_insert_error.err_msg
                         );
@@ -851,9 +851,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
             res = db_update_futures.select_next_some() => {
                 match res {
-                    Err(e) => eprintln!("[warn] DB update was failed: `{:#?}`", e),
+                    Err(e) => warn!("DB update was failed: `{:#?}`", e),
 
-                    Ok(oid) => println!("[info] DB update was successful: `{:?}`", oid)
+                    Ok(oid) => info!("DB update was successful: `{:?}`", oid)
                 } 
             },
         }
@@ -872,7 +872,7 @@ fn get_home_dir() -> anyhow::Result<String> {
 async fn mongodb_setup(
     uri: &str,
 ) -> anyhow::Result<mongodb::Client> {
-    println!("[info] Connecting to the MongoDB daemon...");
+    info!("Connecting to the MongoDB daemon...");
     let mut client_options = ClientOptions::parse(
         uri
     ).await?;
@@ -886,7 +886,7 @@ async fn mongodb_setup(
         .database("admin")
         .run_command(doc! { "ping": 1 })
         .await?;
-    println!("[info] Successfully connected to the MongoDB instance!");
+    info!("Successfully connected to the MongoDB instance!");
     Ok(client)
 }
 
