@@ -321,8 +321,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     );
                                 },
     
-                                JobType::Join(join_details) => {
-                                    info!("New join job from `{peer_id}`: `{join_details:#?}`");
+                                JobType::Join(join_details) => {                                    
                                     let mut progress_map = BitVec::from_bytes(&join_details.progress_map);
                                     progress_map.truncate(join_details.pairs.len());
                                     let mut unproved_pairs = vec![];
@@ -352,8 +351,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         warn!("No unproved pairs to join.");
                                         continue;
                                     }
-                                    let choosen_pair = *unproved_pairs.choose(&mut rng).unwrap();
-                                    info!("Picked `pair {choosen_pair:?}` to join.");
+                                    let choosen_pair = *unproved_pairs.choose(&mut rng).unwrap();                                    
+                                    info!("New join request, picked `pair {choosen_pair:?}` to join.");
                                     prepare_join_job_futures.push(
                                         prepare_join_job(
                                             &ds_client,

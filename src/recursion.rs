@@ -75,7 +75,7 @@ pub async fn prove_and_lift(
                     asset.as_bytes()?.into()
                 };
                 let prove_dur = now.elapsed().as_secs();
-                info!("prove took `{prove_dur} secs`.");  
+                info!("`prove+lift` took `{prove_dur} secs`.");  
                 Ok(ExecutionResult {
                     job_id: job_id.clone(),
                     blob: blob
