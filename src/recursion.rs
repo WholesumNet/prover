@@ -1,24 +1,23 @@
 use risc0_zkvm::{
     ProverOpts, 
     ApiClient,
-    Asset, AssetRequest,
-    // SuccinctReceipt,
-    // Receipt, ReceiptClaim, InnerReceipt,
-    // Journal,
-    VerifierContext, SuccinctReceiptVerifierParameters, 
-    recursion::MerkleGroup,
+    Asset,
+    AssetRequest,
+    SuccinctReceipt,
+    SuccinctReceiptVerifierParameters, 
+    ReceiptClaim,
+    VerifierContext, 
+    Groth16Receipt, 
+    Groth16ReceiptVerifierParameters,
+    sha::Digestible,
 };
-use risc0_circuit_recursion::control_id::{
-    ALLOWED_CONTROL_ROOT, BN254_IDENTITY_CONTROL_ID
-};
-use risc0_zkp::core::hash::poseidon_254::Poseidon254HashSuite;
 
 use std::{
-    // fs,
+    fs,
     path::PathBuf,
     time::{Instant},
-    collections::BTreeMap,
 };
+
 use log::info;
 use anyhow;
 
@@ -131,56 +130,31 @@ pub async fn to_groth16(
 ) -> anyhow::Result<ExecutionResult, ExecutionError> {
     ApiClient::from_env()
     .and_then(|r0_client| {
-        info!("Transforming proof via identity_p254 `{job_id}`...");
+        println!("[info] Extracting Groth16 proof for `{job_id}`...");
         let now = Instant::now();
+        let sr_bytes = fs::read(&in_sr_path)?;
+        let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
+            &sr_bytes
+        )?;
         // 1. transform via identity_p254
-        r0_client
-        .identity_p254(
+        let ident_receipt = r0_client.identity_p254(
             &ProverOpts::succinct(),
-            Asset::Path(in_sr_path),
-            AssetRequest::Inline,
-        )
-        .and_then(|p254_receipt| {
-            let dur = now.elapsed().as_secs();
-            info!("`identity_p254` took `{dur} secs`");
+            Asset::Inline(sr_bytes.into()),
+            AssetRequest::Inline
+        )?;
+        let seal_bytes = ident_receipt.get_seal_bytes();
+        let seal = risc0_zkvm::stark_to_snark(&seal_bytes)?.to_vec();
+        let groth16_proof = Groth16Receipt::new(
+            seal,
+            sr.claim.clone(),
+            Groth16ReceiptVerifierParameters::default().digest()
+        );
+        let groth16_dur = now.elapsed().as_secs();
+        println!("[info](DUR) Groth16 took `{groth16_dur} secs`."); 
 
-            let verifier_parameters = SuccinctReceiptVerifierParameters {
-                control_root: MerkleGroup::new(vec![BN254_IDENTITY_CONTROL_ID])?
-                    .calc_root(Poseidon254HashSuite::new_suite().hashfn.as_ref()),
-                inner_control_root: Some(ALLOWED_CONTROL_ROOT),
-                ..Default::default()
-            };
-            let _ = p254_receipt.verify_integrity_with_context(
-                &VerifierContext::empty()
-                    .with_suites(BTreeMap::from([(
-                        "poseidon_254".to_string(),
-                        Poseidon254HashSuite::new_suite(),
-                    )]))
-                    .with_succinct_verifier_parameters(verifier_parameters),
-            )?;
-            Ok(p254_receipt)
-        })
-        .and_then(|p254_receipt| {
-            // 2. extract the compressed snark(Groth16)
-            let asset: Asset = p254_receipt.try_into()?;
-            info!("compressing the p254 proof to get a groth16 proof...`");    
-            let now = Instant::now();    
-            let groth16_receipt = r0_client
-                .compress(
-                    &ProverOpts::groth16(),
-                    Asset::Inline(asset.as_bytes()?),
-                    AssetRequest::Inline,
-                )?;
-            let dur = now.elapsed().as_secs();
-            info!("`compress` took `{dur} secs`");
-            let blob: Vec<u8> = {
-                let asset: Asset = groth16_receipt.try_into()?;
-                asset.as_bytes()?.into()
-            };
-            Ok(ExecutionResult {
-                job_id: job_id.clone(),
-                blob: blob
-            })
+        Ok(ExecutionResult {
+            job_id: job_id.clone(),
+            blob: bincode::serialize(&groth16_proof)?,
         })
     })
     .map_err(|e| ExecutionError {
