@@ -130,7 +130,7 @@ pub async fn to_groth16(
 ) -> anyhow::Result<ExecutionResult, ExecutionError> {
     ApiClient::from_env()
     .and_then(|r0_client| {
-        println!("[info] Extracting Groth16 proof for `{job_id}`...");
+        info!("Extracting Groth16 proof for `{job_id}`...");
         let now = Instant::now();
         let sr_bytes = fs::read(&in_sr_path)?;
         let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
@@ -150,7 +150,7 @@ pub async fn to_groth16(
             Groth16ReceiptVerifierParameters::default().digest()
         );
         let groth16_dur = now.elapsed().as_secs();
-        println!("[info](DUR) Groth16 took `{groth16_dur} secs`."); 
+        info!("Groth16 took `{groth16_dur} secs`."); 
 
         Ok(ExecutionResult {
             job_id: job_id.clone(),
