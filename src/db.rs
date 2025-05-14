@@ -4,8 +4,8 @@ use serde::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobType {
-    Prove(u32),
-    Join(String, String),
+    Segment(u32),
+    Join(u32),
     Groth16,
 }
 
@@ -18,10 +18,9 @@ pub struct Proof {
 
     pub job_type: JobType,
 
-    // ie the client
+    // the client
     pub owner: String,
 
-    pub blob: Vec<u8>,
-    pub blob_filepath: Option<String>,
-    pub blob_cid: Option<String>,
+    pub input_blobs: Vec<Vec<u8>>,
+    pub blob: Vec<u8>,    
 }

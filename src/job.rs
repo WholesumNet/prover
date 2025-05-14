@@ -1,30 +1,24 @@
 use libp2p::PeerId;
-use mongodb::bson::Bson;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Status {    
     Running,
     
-    // param: proof's cid
-    ExecutionSucceeded(String),
+    ExecutionSucceded,
     
     // param: error message
     ExecutionFailed(String),
-
-    // param: failed upload retry attempts so far
-    UploadFailed(u32),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum JobType {
-    Prove(u32),
-    Join(String, String),
+    Segment(u32),
+    Join(u32),
     Groth16,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proof {
-    pub filepath: Option<String>,
     pub blob: Vec<u8>
 }
 
@@ -37,7 +31,7 @@ pub struct Job {
     // job_id as we know it: base_id+item_id
     pub id: String, 
 
-    pub working_dir: String,
+    // pub working_dir: String,
     
     // the client
     pub owner: PeerId,
@@ -46,10 +40,9 @@ pub struct Job {
 
     pub job_type: JobType,
 
-    // result of the job
-    pub proof: Option<Proof>,
+    pub input_blobs: Vec<Vec<u8>>,
 
-    // db oid
-    pub db_oid: Option<Bson>, 
+    // result of the job
+    pub proof: Option<Proof>
 }
 

@@ -13,8 +13,6 @@ use risc0_zkvm::{
 };
 
 use std::{
-    fs,
-    path::PathBuf,
     time::{Instant},
 };
 
@@ -33,9 +31,10 @@ pub struct ExecutionError {
     pub err_msg: String,
 }
 
-pub async fn prove_and_lift(
+// prove and lift the segment
+pub async fn prove_segment(
     job_id: String,
-    seg_path: PathBuf
+    blob: Vec<u8>
 ) -> Result<ExecutionResult, ExecutionError> {
     info!("Proving segment `{job_id}`...");
     ApiClient::from_env()
@@ -44,7 +43,7 @@ pub async fn prove_and_lift(
         r0_client
         .prove_segment(
             &ProverOpts::succinct(),
-            Asset::Path(seg_path),
+            Asset::Inline(blob.into()),
             AssetRequest::Inline,
         )
         .and_then(|segment_receipt| {
@@ -74,7 +73,7 @@ pub async fn prove_and_lift(
                     asset.as_bytes()?.into()
                 };
                 let prove_dur = now.elapsed().as_secs();
-                info!("prove took `{prove_dur} secs`.");  
+                info!("`Segment prove + lift` took `{prove_dur} secs`.");  
                 Ok(ExecutionResult {
                     job_id: job_id.clone(),
                     blob: blob
@@ -90,8 +89,8 @@ pub async fn prove_and_lift(
 
 pub async fn join(
     job_id: String,
-    left_sr_path: PathBuf,
-    right_sr_path: PathBuf,
+    left_proof: Vec<u8>,
+    right_proof: Vec<u8>,
 ) -> Result<ExecutionResult, ExecutionError> {
     info!("Joining proofs `{job_id}`...", );
     ApiClient::from_env()
@@ -100,8 +99,8 @@ pub async fn join(
         r0_client
         .join(
             &ProverOpts::succinct(),
-            Asset::Path(left_sr_path),
-            Asset::Path(right_sr_path),
+            Asset::Inline(left_proof.into()),
+            Asset::Inline(right_proof.into()),
             AssetRequest::Inline,
         )
         .and_then(|join_receipt| {
@@ -111,7 +110,7 @@ pub async fn join(
                 asset.as_bytes()?.into()
             };
             let join_dur = now.elapsed().as_secs();
-            info!("`join` took `{join_dur} secs`.");  
+            info!("`Join` took `{join_dur} secs`.");  
             Ok(ExecutionResult {
                 job_id: job_id.clone(),
                 blob: blob
@@ -126,20 +125,19 @@ pub async fn join(
 
 pub async fn to_groth16(
     job_id: String,
-    in_sr_path: PathBuf
+    blob: Vec<u8>
 ) -> anyhow::Result<ExecutionResult, ExecutionError> {
     ApiClient::from_env()
     .and_then(|r0_client| {
         info!("Extracting Groth16 proof for `{job_id}`...");
         let now = Instant::now();
-        let sr_bytes = fs::read(&in_sr_path)?;
         let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
-            &sr_bytes
+            &blob
         )?;
         // 1. transform via identity_p254
         let ident_receipt = r0_client.identity_p254(
             &ProverOpts::succinct(),
-            Asset::Inline(sr_bytes.into()),
+            Asset::Inline(blob.into()),
             AssetRequest::Inline
         )?;
         let seal_bytes = ident_receipt.get_seal_bytes();
@@ -150,7 +148,7 @@ pub async fn to_groth16(
             Groth16ReceiptVerifierParameters::default().digest()
         );
         let groth16_dur = now.elapsed().as_secs();
-        info!("Groth16 took `{groth16_dur} secs`."); 
+        info!("`Groth16` took `{groth16_dur} secs`."); 
 
         Ok(ExecutionResult {
             job_id: job_id.clone(),
