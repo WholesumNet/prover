@@ -28,9 +28,7 @@ rand = "0.8.5"
 base64 = "0.22.1"
 mongodb = "3.1.0"
 
-risc0-zkvm = { version = "2.0", features = ["prove"] }
-risc0-zkp = { version = "2.0", features = ["prove"] }
-risc0-circuit-recursion = "2.0"
+risc0-zkvm = { version = "2.0", features = ["prove", "unstable"] }
 
 comms = { path = "../comms" }
 dstorage = { path = "../dstorage" }

@@ -57,7 +57,7 @@ use comms::{
 };
 
 mod job;
-mod recursion;
+mod r0;
 mod db;
 
 // CLI
@@ -332,7 +332,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     // run it
                                     //@ use reference of blobs instead
                                     segment_prove_futures.push(
-                                        recursion::prove_segment(
+                                        r0::prove_and_lift_segment(
                                             prove_id,
                                             segment_details.id,
                                             segment_details.po2,
@@ -366,7 +366,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     // run it
                                     //@ use reference of blobs instead
                                     join_prove_futures.push(
-                                        recursion::join(
+                                        r0::join(
                                             join_id.clone(),
                                             join_details.blob_pair.0.clone(),
                                             join_details.blob_pair.1.clone(),
@@ -392,7 +392,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     // run it
                                     //@ use reference of blobs instead
                                     groth16_prove_futures.push(
-                                        recursion::to_groth16(
+                                        r0::to_groth16(
                                             groth16_id,
                                             groth16_details.blob.clone(),
                                         )
