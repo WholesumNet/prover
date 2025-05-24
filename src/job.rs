@@ -19,6 +19,9 @@ pub enum JobType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proof {
+    // xxh3_64
+    pub hash: u64,
+
     pub blob: Vec<u8>
 }
 

@@ -25,6 +25,7 @@ use log::{info, warn};
 
 use clap::Parser;
 // use reqwest;
+use xxhash_rust::xxh3;
 
 use libp2p::{
     gossipsub, mdns, request_response,
@@ -45,9 +46,14 @@ use mongodb::{
 };
 
 use comms::{
-    p2p::{ MyBehaviourEvent },
+    p2p::{
+        MyBehaviourEvent
+    },
     protocol,
-    protocol::{ Need, Proof},
+    protocol::{
+        Need,
+        ProofToken
+    },
 };
 
 mod job;
@@ -58,8 +64,8 @@ mod db;
 #[derive(Parser, Debug)]
 #[command(name = "Prover CLI for Wholesum")]
 #[command(author = "Wholesum team")]
-#[command(version = "0.1")]
-#[command(about = "Wholesum is a P2P verifiable computing marketplace and \
+#[command(version = "1.0")]
+#[command(about = "Wholesum is a p2p prover network and \
                    this program is a CLI for prover nodes.",
           long_about = None)
 ]
@@ -273,12 +279,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         protocol::ProofType::Join(pair_id),
 
                                     job::JobType::Groth16 => 
-                                        protocol::ProofType::Groth16,
+                                        protocol::ProofType::Groth16(job.proof.clone().unwrap().blob),
                                 };
-                                proofs.push(Proof {
+                                proofs.push(ProofToken {
                                     job_id: job.base_id.clone(),
                                     proof_type: proof_type,
-                                    blob: job.proof.clone().unwrap().blob
+                                    blob_hash: job.proof.as_ref().unwrap().hash
                                 });                                
                             }                            
                             if proofs.len() > 0 {
@@ -286,7 +292,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     .behaviour_mut().req_resp
                                     .send_request(
                                         &peer_id,
-                                        protocol::Request::ProofIsReady(proofs),
+                                        protocol::Request::ProofsAreReady(proofs),
                                     );
                             }
                         },
@@ -328,6 +334,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     segment_prove_futures.push(
                                         recursion::prove_segment(
                                             prove_id,
+                                            segment_details.id,
+                                            segment_details.po2,
                                             segment_details.blob.clone() 
                                         )
                                     );
@@ -434,9 +442,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .into_future()
                 );
 
+                let blob_hash = xxh3::xxh3_64(&res.blob);
                 job.proof = Some(
                     job::Proof {
-                        blob: res.blob.clone() 
+                        hash: blob_hash,
+                        blob: res.blob
                     }
                 );
 
@@ -445,11 +455,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .req_resp
                     .send_request(
                         &job.owner,
-                        protocol::Request::ProofIsReady(vec![
-                            protocol::Proof {
+                        protocol::Request::ProofsAreReady(vec![
+                            protocol::ProofToken {
                                 job_id: job.base_id.clone(),
                                 proof_type: protocol::ProofType::Segment(segment_id),
-                                blob: res.blob
+                                blob_hash: blob_hash
                             }
                         ])
                     ); 
@@ -488,8 +498,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .into_future()
                 );
 
+                let blob_hash = xxh3::xxh3_64(&res.blob);
                 job.proof = Some(
                     job::Proof {
+                        hash: blob_hash,
                         blob: res.blob.clone() 
                     }
                 );
@@ -499,11 +511,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .req_resp
                     .send_request(
                         &job.owner,
-                        protocol::Request::ProofIsReady(vec![
-                            protocol::Proof {
+                        protocol::Request::ProofsAreReady(vec![
+                            protocol::ProofToken {
                                 job_id: job.base_id.clone(),
                                 proof_type: protocol::ProofType::Join(pair_id),
-                                blob: res.blob
+                                blob_hash: blob_hash
                             }
                         ])
                     );  
@@ -537,8 +549,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .into_future()
                 );
 
+                let blob_hash = xxh3::xxh3_64(&res.blob);
                 job.proof = Some(
                     job::Proof {
+                        hash: blob_hash,
                         blob: res.blob.clone() 
                     }
                 );
@@ -548,11 +562,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .req_resp
                     .send_request(
                         &job.owner,
-                        protocol::Request::ProofIsReady(vec![
-                            protocol::Proof {
+                        protocol::Request::ProofsAreReady(vec![
+                            protocol::ProofToken {
                                 job_id: job.base_id.clone(),
-                                proof_type: protocol::ProofType::Groth16,
-                                blob: res.blob
+                                proof_type: protocol::ProofType::Groth16(res.blob),
+                                blob_hash: blob_hash,
                             }
                         ])
                     );                

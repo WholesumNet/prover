@@ -1,15 +1,10 @@
-use risc0_zkvm::{
-    ProverOpts, 
-    ApiClient,
-    Asset,
-    AssetRequest,
-    SuccinctReceipt,
-    SuccinctReceiptVerifierParameters, 
-    ReceiptClaim,
-    VerifierContext, 
-    Groth16Receipt, 
-    Groth16ReceiptVerifierParameters,
+use risc0_zkvm::{    
     sha::Digestible,
+    ApiClient,
+    ProverOpts, 
+    SuccinctReceipt, ReceiptClaim,
+    Groth16Receipt, Groth16ReceiptVerifierParameters,
+    Asset, AssetRequest,
 };
 
 use std::{
@@ -34,57 +29,44 @@ pub struct ExecutionError {
 // prove and lift the segment
 pub async fn prove_segment(
     job_id: String,
+    index: u32,
+    po2: u32,
     blob: Vec<u8>
 ) -> Result<ExecutionResult, ExecutionError> {
-    info!("Proving segment `{job_id}`...");
+    info!("Proving `segment-{index}` with po2(`{po2}`) for `{job_id}`, length: `{} bytes`",
+        blob.len()
+    );
     ApiClient::from_env()
-    .and_then(|r0_client| {   
-        let now = Instant::now();      
-        r0_client
-        .prove_segment(
-            &ProverOpts::succinct(),
-            Asset::Inline(blob.into()),
-            AssetRequest::Inline,
-        )
-        .and_then(|segment_receipt| {
-            let _ = segment_receipt
-            .verify_integrity_with_context(
-                &VerifierContext::with_succinct_verifier_parameters(
-                    VerifierContext::default(),
-                    SuccinctReceiptVerifierParameters::default(),
-                )
-            )?;
-            Ok(segment_receipt)
-        })
-        .and_then(|verified_segment_receipt|
+        .and_then(|r0_client| {   
+            let opts = ProverOpts::succinct();
+            let now = Instant::now();      
             r0_client
-            .lift(
-                &ProverOpts::succinct(),
-                verified_segment_receipt.try_into()?,
-                AssetRequest::Inline
+            .prove_segment(
+                &opts,
+                Asset::Inline(blob.into()),
+                AssetRequest::Inline,
             )
-            .and_then(|lift_receipt| {
-                let _ = lift_receipt.verify_integrity()?;
-                Ok(lift_receipt)
-            })
-            .and_then(|verified_lift_receipt| {    
-                let blob: Vec<u8> = {
-                    let asset: Asset = verified_lift_receipt.try_into()?;
-                    asset.as_bytes()?.into()
-                };
-                let prove_dur = now.elapsed().as_secs();
-                info!("`Segment prove + lift` took `{prove_dur} secs`.");  
-                Ok(ExecutionResult {
-                    job_id: job_id.clone(),
-                    blob: blob
-                })    
-            })
-        )        
-    })    
-    .map_err(|e| ExecutionError {
-        job_id: job_id.clone(),
-        err_msg: e.to_string()
-    })
+            .and_then(|segment_receipt|
+                r0_client
+                .lift(
+                    &opts,
+                    segment_receipt.try_into()?,
+                    AssetRequest::Inline
+                )
+                .and_then(|lift_receipt| {                        
+                    let segment_dur = now.elapsed().as_secs();
+                    info!("Done, segment prove + lift took `{segment_dur} secs`.");  
+                    Ok(ExecutionResult {
+                        job_id: job_id.clone(),
+                        blob: bincode::serialize(&lift_receipt)?
+                    })    
+                })
+            )        
+        })    
+        .map_err(|e| ExecutionError {
+            job_id: job_id.clone(),
+            err_msg: e.to_string()
+        })
 } 
 
 pub async fn join(
@@ -92,7 +74,7 @@ pub async fn join(
     left_proof: Vec<u8>,
     right_proof: Vec<u8>,
 ) -> Result<ExecutionResult, ExecutionError> {
-    info!("Joining proofs `{job_id}`...", );
+    info!("Joining proofs for `{job_id}`", );
     ApiClient::from_env()
     .and_then(|r0_client| {
         let now = Instant::now();     
@@ -104,16 +86,11 @@ pub async fn join(
             AssetRequest::Inline,
         )
         .and_then(|join_receipt| {
-            let _ = join_receipt.verify_integrity()?;
-            let blob: Vec<u8> = {
-            let asset: Asset = join_receipt.try_into()?;
-                asset.as_bytes()?.into()
-            };
             let join_dur = now.elapsed().as_secs();
-            info!("`Join` took `{join_dur} secs`.");  
+            info!("Done, join took `{join_dur} secs`.");  
             Ok(ExecutionResult {
                 job_id: job_id.clone(),
-                blob: blob
+                blob: bincode::serialize(&join_receipt)?
             })        
         })        
     })
@@ -129,18 +106,19 @@ pub async fn to_groth16(
 ) -> anyhow::Result<ExecutionResult, ExecutionError> {
     ApiClient::from_env()
     .and_then(|r0_client| {
-        info!("Extracting Groth16 proof for `{job_id}`...");
+        info!("Extracting Groth16 proof for `{job_id}`");
         let now = Instant::now();
         let sr: SuccinctReceipt<ReceiptClaim> = bincode::deserialize(
             &blob
         )?;
-        // 1. transform via identity_p254
+        // 1- transform via identity_p254
         let ident_receipt = r0_client.identity_p254(
             &ProverOpts::succinct(),
             Asset::Inline(blob.into()),
             AssetRequest::Inline
         )?;
         let seal_bytes = ident_receipt.get_seal_bytes();
+        // 2- stark to snark
         let seal = risc0_zkvm::stark_to_snark(&seal_bytes)?.to_vec();
         let groth16_proof = Groth16Receipt::new(
             seal,
@@ -148,7 +126,7 @@ pub async fn to_groth16(
             Groth16ReceiptVerifierParameters::default().digest()
         );
         let groth16_dur = now.elapsed().as_secs();
-        info!("`Groth16` took `{groth16_dur} secs`."); 
+        info!("Done, groth16 took `{groth16_dur} secs`."); 
 
         Ok(ExecutionResult {
             job_id: job_id.clone(),
