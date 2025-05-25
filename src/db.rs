@@ -4,8 +4,14 @@ use serde::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobType {
+    Keccak([u8; 32]),
+
+    Zkr([u8; 32]),
+
     Segment(u32),
+
     Join(u32),
+    
     Groth16,
 }
 

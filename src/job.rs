@@ -12,8 +12,18 @@ pub enum Status {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum JobType {
+    // param: claim digest
+    Keccak([u8; 32]),
+
+    // param: claim digest
+    Zkr([u8; 32]),
+
+    // param: segment id
     Segment(u32),
+
+    // param: pair id
     Join(u32),
+
     Groth16,
 }
 

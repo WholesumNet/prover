@@ -93,7 +93,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     // let's maintain a list of jobs
     let mut jobs = HashMap::<String, job::Job>::new();
     
-    // pull jobs' execution
+    // pull jobs to completion
+    let mut keccak_prove_futures = FuturesUnordered::new();
+    let mut zkr_prove_futures = FuturesUnordered::new();
     let mut segment_prove_futures = FuturesUnordered::new();
     let mut join_prove_futures = FuturesUnordered::new();
     let mut groth16_prove_futures = FuturesUnordered::new();
@@ -272,6 +274,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     continue;
                                 }                                
                                 let proof_type = match job.job_type {
+                                    job::JobType::Keccak(claim_digest) => 
+                                        protocol::ProofType::Keccak(claim_digest),                                    
+
+                                    job::JobType::Zkr(claim_digest) => 
+                                        protocol::ProofType::Zkr(claim_digest),                                    
+
                                     job::JobType::Segment(segment_id) => 
                                         protocol::ProofType::Segment(segment_id),
                                     
@@ -310,6 +318,64 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     match response {
                         protocol::Response::Job(compute_job) => {                            
                             match compute_job.job_type {
+                                protocol::JobType::Keccak(keccak_details) => {
+                                    let prove_id = format!(
+                                        "{}-{:?}",
+                                        compute_job.job_id,
+                                        keccak_details.claim_digest
+                                    );
+                                    // keep track of running jobs                
+                                    jobs.insert(                    
+                                        prove_id.clone(),
+                                        job::Job {
+                                            base_id: compute_job.job_id,
+                                            id: prove_id.clone(),
+                                            owner: client_peer_id,
+                                            status: job::Status::Running,
+                                            job_type: job::JobType::Keccak(keccak_details.claim_digest.clone()),
+                                            input_blobs: vec![keccak_details.blob.clone()],
+                                            proof: None,
+                                        },
+                                    );
+                                    // run it
+                                    //@ use reference of blobs instead
+                                    keccak_prove_futures.push(
+                                        r0::prove_keccak(
+                                            prove_id,
+                                            keccak_details.blob.clone() 
+                                        )
+                                    );
+                                },
+
+                                protocol::JobType::Zkr(zkr_details) => {
+                                    let prove_id = format!(
+                                        "{}-{:?}",
+                                        compute_job.job_id,
+                                        zkr_details.claim_digest
+                                    );
+                                    // keep track of running jobs                
+                                    jobs.insert(                    
+                                        prove_id.clone(),
+                                        job::Job {
+                                            base_id: compute_job.job_id,
+                                            id: prove_id.clone(),
+                                            owner: client_peer_id,
+                                            status: job::Status::Running,
+                                            job_type: job::JobType::Zkr(zkr_details.claim_digest.clone()),
+                                            input_blobs: vec![zkr_details.blob.clone()],
+                                            proof: None,
+                                        },
+                                    );
+                                    // run it
+                                    //@ use reference of blobs instead
+                                    zkr_prove_futures.push(
+                                        r0::prove_zkr(
+                                            prove_id,
+                                            zkr_details.blob.clone() 
+                                        )
+                                    );
+                                }
+
                                 protocol::JobType::Segment(segment_details) => {
                                     let prove_id = format!(
                                         "{}-{}",
@@ -406,7 +472,121 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 _ => {
                     // println!("{:#?}", event)
                 },
-            },                        
+            },
+
+            // keccak is proved
+            er = keccak_prove_futures.select_next_some() => {
+                if let Err(failed) = er {
+                    warn!("Failed to run prove keccak job: `{:#?}`", failed);       
+                    //@ wtd with job?
+                    let job = jobs.get_mut(&failed.job_id).unwrap();
+                    job.status = job::Status::ExecutionFailed(failed.err_msg);
+                    continue;
+                }
+                let res = er.unwrap();
+                let job = jobs.get_mut(&res.job_id).unwrap();
+                job.status = job::Status::ExecutionSucceded;
+                info!("Prove keccak is finished for `{}`", res.job_id);
+                let claim_digest = if let job::JobType::Keccak(claim_digest) = job.job_type { 
+                    claim_digest
+                } else {
+                    warn!("No claim digest is available for `{:?}`.", job.job_type);
+                    [0u8; 32]
+                };
+                // record to db                
+                db_insert_futures.push(
+                    col_proofs.insert_one(
+                        db::Proof {
+                            client_job_id: job.base_id.clone(),
+                            job_id: job.id.clone(),
+                            job_type: db::JobType::Keccak(claim_digest),
+                            owner: job.owner.to_string(),
+                            input_blobs: job.input_blobs.clone(),
+                            blob: res.blob.clone(),                    
+                        }
+                    )
+                    .into_future()
+                );
+
+                let blob_hash = xxh3::xxh3_64(&res.blob);
+                job.proof = Some(
+                    job::Proof {
+                        hash: blob_hash,
+                        blob: res.blob
+                    }
+                );
+
+                let _ = swarm
+                    .behaviour_mut()
+                    .req_resp
+                    .send_request(
+                        &job.owner,
+                        protocol::Request::ProofsAreReady(vec![
+                            protocol::ProofToken {
+                                job_id: job.base_id.clone(),
+                                proof_type: protocol::ProofType::Keccak(claim_digest),
+                                blob_hash: blob_hash
+                            }
+                        ])
+                    ); 
+            },
+
+            // zkr is proved
+            er = zkr_prove_futures.select_next_some() => {
+                if let Err(failed) = er {
+                    warn!("Failed to run prove zkr job: `{:#?}`", failed);       
+                    //@ wtd with job?
+                    let job = jobs.get_mut(&failed.job_id).unwrap();
+                    job.status = job::Status::ExecutionFailed(failed.err_msg);
+                    continue;
+                }
+                let res = er.unwrap();
+                let job = jobs.get_mut(&res.job_id).unwrap();
+                job.status = job::Status::ExecutionSucceded;
+                info!("Prove zkr is finished for `{}`", res.job_id);
+                let claim_digest = if let job::JobType::Zkr(claim_digest) = job.job_type { 
+                    claim_digest
+                } else {
+                    warn!("No claim digest is available for `{:?}`.", job.job_type);
+                    [0u8; 32]
+                };
+                // record to db                
+                db_insert_futures.push(
+                    col_proofs.insert_one(
+                        db::Proof {
+                            client_job_id: job.base_id.clone(),
+                            job_id: job.id.clone(),
+                            job_type: db::JobType::Zkr(claim_digest),
+                            owner: job.owner.to_string(),
+                            input_blobs: job.input_blobs.clone(),
+                            blob: res.blob.clone(),                    
+                        }
+                    )
+                    .into_future()
+                );
+
+                let blob_hash = xxh3::xxh3_64(&res.blob);
+                job.proof = Some(
+                    job::Proof {
+                        hash: blob_hash,
+                        blob: res.blob
+                    }
+                );
+
+                let _ = swarm
+                    .behaviour_mut()
+                    .req_resp
+                    .send_request(
+                        &job.owner,
+                        protocol::Request::ProofsAreReady(vec![
+                            protocol::ProofToken {
+                                job_id: job.base_id.clone(),
+                                proof_type: protocol::ProofType::Zkr(claim_digest),
+                                blob_hash: blob_hash
+                            }
+                        ])
+                    ); 
+            },
 
             // segment is proved
             er = segment_prove_futures.select_next_some() => {

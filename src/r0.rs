@@ -15,6 +15,10 @@ use std::{
 use log::info;
 use anyhow;
 
+use comms::protocol::{
+    KeccakRequestObject, ZkrRequestObject
+};
+
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub job_id: String,
@@ -103,13 +107,18 @@ pub async fn join(
 
 pub async fn prove_keccak(
     job_id: String,
-    prove_keccak_request: ProveKeccakRequest
-) -> Result<ExecutionResult, ExecutionError> {
-    info!("Proving keccak with claim digest `{:?}` for `{job_id}`", 
-        prove_keccak_request.claim_digest,        
-    );
+    blob: Vec<u8>
+) -> Result<ExecutionResult, ExecutionError> {    
+    info!("Proving keccak for `{job_id}`");
     ApiClient::from_env()
     .and_then(|r0_client| {        
+        let keccack_request_object: KeccakRequestObject = bincode::deserialize(&blob)?;
+        let prove_keccak_request = ProveKeccakRequest {
+            claim_digest: keccack_request_object.claim_digest.into(),
+            po2: keccack_request_object.po2,
+            control_root: keccack_request_object.control_root.into(),
+            input: keccack_request_object.input
+        };
         let now = Instant::now();     
         r0_client
             .prove_keccak(
@@ -133,14 +142,18 @@ pub async fn prove_keccak(
 
 pub async fn prove_zkr(
     job_id: String,
-    prove_zkr_request: ProveZkrRequest
+    blob: Vec<u8>
 ) -> Result<ExecutionResult, ExecutionError> {
-    info!("Proving zkr with claim digest `{:?}` for `{job_id}`", 
-        prove_zkr_request.claim_digest,        
-    );
+    info!("Proving zkr for `{job_id}`");
     ApiClient::from_env()
     .and_then(|r0_client| {        
         let now = Instant::now();     
+        let zkr_request_object: ZkrRequestObject = bincode::deserialize(&blob)?;
+        let prove_zkr_request = ProveZkrRequest {
+            claim_digest: zkr_request_object.claim_digest.into(),
+            control_id: zkr_request_object.control_id.into(),
+            input: zkr_request_object.input
+        };
         r0_client
             .prove_zkr(
                 prove_zkr_request,
