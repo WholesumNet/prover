@@ -35,10 +35,9 @@ pub struct ExecutionError {
 pub async fn prove_and_lift_segment(
     job_id: String,
     index: u32,
-    po2: u32,
     blob: Vec<u8>
 ) -> Result<ExecutionResult, ExecutionError> {
-    info!("Proving `segment-{index}` with po2(`{po2}`) for `{job_id}`, length: `{} bytes`",
+    info!("Proving `segment-{index}` for `{job_id}`, length: `{} bytes`",
         blob.len()
     );
     ApiClient::from_env()

@@ -401,7 +401,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         r0::prove_and_lift_segment(
                                             prove_id,
                                             segment_details.id,
-                                            segment_details.po2,
                                             segment_details.blob.clone() 
                                         )
                                     );
@@ -493,6 +492,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     warn!("No claim digest is available for `{:?}`.", job.job_type);
                     [0u8; 32]
                 };
+                let blob_hash = xxh3::xxh3_128(&res.blob);
                 // record to db                
                 db_insert_futures.push(
                     col_proofs.insert_one(
@@ -502,19 +502,19 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             job_type: db::JobType::Keccak(claim_digest),
                             owner: job.owner.to_string(),
                             input_blobs: job.input_blobs.clone(),
-                            blob: res.blob.clone(),                    
+                            blob: res.blob.clone(),    
+                            hash: blob_hash,                
                         }
                     )
                     .into_future()
                 );
-
-                let blob_hash = xxh3::xxh3_64(&res.blob);
                 job.proof = Some(
                     job::Proof {
                         hash: blob_hash,
                         blob: res.blob
                     }
                 );
+
 
                 let _ = swarm
                     .behaviour_mut()
@@ -550,6 +550,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     warn!("No claim digest is available for `{:?}`.", job.job_type);
                     [0u8; 32]
                 };
+                let blob_hash = xxh3::xxh3_128(&res.blob);
                 // record to db                
                 db_insert_futures.push(
                     col_proofs.insert_one(
@@ -560,12 +561,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             owner: job.owner.to_string(),
                             input_blobs: job.input_blobs.clone(),
                             blob: res.blob.clone(),                    
+                            hash: blob_hash
                         }
                     )
                     .into_future()
                 );
 
-                let blob_hash = xxh3::xxh3_64(&res.blob);
                 job.proof = Some(
                     job::Proof {
                         hash: blob_hash,
@@ -607,6 +608,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     warn!("No segment-id is available for `{:?}`.", job.job_type);
                     u32::MAX
                 };
+                let blob_hash = xxh3::xxh3_128(&res.blob);
                 // record to db                
                 db_insert_futures.push(
                     col_proofs.insert_one(
@@ -616,13 +618,13 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             job_type: db::JobType::Segment(segment_id),
                             owner: job.owner.to_string(),
                             input_blobs: job.input_blobs.clone(),
-                            blob: res.blob.clone(),                    
+                            blob: res.blob.clone(),
+                            hash: blob_hash,
                         }
                     )
                     .into_future()
                 );
 
-                let blob_hash = xxh3::xxh3_64(&res.blob);
                 job.proof = Some(
                     job::Proof {
                         hash: blob_hash,
@@ -663,6 +665,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     warn!("No pair-id is available for `{:?}`.", job.job_type);
                     u32::MAX
                 };
+                let blob_hash = xxh3::xxh3_128(&res.blob);
                 // record to db                
                 db_insert_futures.push(
                     col_proofs.insert_one(
@@ -672,13 +675,13 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             job_type: db::JobType::Join(pair_id),
                             owner: job.owner.to_string(),
                             input_blobs: job.input_blobs.clone(),
-                            blob: res.blob.clone(),                    
+                            blob: res.blob.clone(),
+                            hash: blob_hash,
                         }
                     )
                     .into_future()
                 );
 
-                let blob_hash = xxh3::xxh3_64(&res.blob);
                 job.proof = Some(
                     job::Proof {
                         hash: blob_hash,
@@ -714,6 +717,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 let job = jobs.get_mut(&res.job_id).unwrap();
                 job.status = job::Status::ExecutionSucceded;
                 info!("`groth16` extraction is finished for `{}`.", res.job_id);
+                let blob_hash = xxh3::xxh3_128(&res.blob);
                 // record to db                
                 db_insert_futures.push(
                     col_proofs.insert_one(
@@ -723,20 +727,20 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             job_type: db::JobType::Groth16,
                             owner: job.owner.to_string(),
                             input_blobs: job.input_blobs.clone(),
-                            blob: res.blob.clone(),                    
+                            blob: res.blob.clone(),       
+                            hash: blob_hash,             
                         }
                     )
                     .into_future()
                 );
 
-                let blob_hash = xxh3::xxh3_64(&res.blob);
                 job.proof = Some(
                     job::Proof {
                         hash: blob_hash,
                         blob: res.blob.clone() 
                     }
                 );
-
+                
                 let _ = swarm
                     .behaviour_mut()
                     .req_resp
@@ -750,6 +754,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             }
                         ])
                     );                
+
             },            
 
             res = db_insert_futures.select_next_some() => {

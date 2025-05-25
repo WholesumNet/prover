@@ -27,6 +27,8 @@ pub struct Proof {
     // the client
     pub owner: String,
 
-    pub input_blobs: Vec<Vec<u8>>,
+    pub input_blobs: Vec<Vec<u8>>,    
     pub blob: Vec<u8>,    
+    pub hash: u128,
+
 }
