@@ -3,7 +3,7 @@ use serde::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum JobType {
+pub enum JobKind {
     Keccak([u8; 32]),
 
     Zkr([u8; 32]),
@@ -22,7 +22,7 @@ pub struct Proof {
     // job_id from prover pov: job_id+item_id
     pub job_id: String,
 
-    pub job_type: JobType,
+    pub kind: JobKind,
 
     // the client
     pub owner: String,

@@ -1,7 +1,12 @@
+use std::collections::{
+    HashMap, BTreeMap
+};
 use libp2p::PeerId;
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Status {    
+pub enum Status {
+    WaitingForBlobs,
+
     Running,
     
     ExecutionSucceded,
@@ -11,17 +16,17 @@ pub enum Status {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum JobType {
+pub enum Kind {
     // param: claim digest
     Keccak([u8; 32]),
 
     // param: claim digest
     Zkr([u8; 32]),
 
-    // param: segment id
+    // param: batch id
     Segment(u32),
 
-    // param: pair id
+    // param: batch id
     Join(u32),
 
     Groth16,
@@ -29,10 +34,18 @@ pub enum JobType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proof {
-    // xxh3
+    // xxh3_128
     pub hash: u128,
 
     pub blob: Vec<u8>
+}
+
+#[derive(Debug)]
+pub struct Token {
+    // xxh3_128
+    pub hash: u128,
+
+    pub owners: Vec<String>
 }
 
 // maintain lifecycle of a job
@@ -51,9 +64,15 @@ pub struct Job {
 
     pub status: Status,
 
-    pub job_type: JobType,
+    pub kind: Kind,
 
-    pub input_blobs: Vec<Vec<u8>>,
+    pub input_blobs: BTreeMap<usize, Vec<u8>>,
+
+    // must be satisfied before proving can start
+    // <index, token>
+    pub prerequisites: BTreeMap<usize, Token>,
+    // inverse helper map to put received blobs
+    pub pending_blobs: HashMap<u128, usize>,
 
     // result of the job
     pub proof: Option<Proof>
