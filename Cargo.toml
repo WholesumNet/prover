@@ -8,14 +8,12 @@ edition = "2021"
 [dependencies]
 serde = {version = "1.0", features = ["derive"]}
 toml = "0.7"
-async-std = { version = "1.12", features = ["attributes", "unstable"] }
-async-trait = "0.1"
 futures = "0.3.28"
 futures-util = "0.3.29"
 env_logger = "0.10.0"
 log = "0.4.25"
-libp2p = { version = "0.53.2", features = ["async-std", "kad", "identify", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
-libp2p-quic = { version = "0.10.2", features = ["async-std"] }
+libp2p = { version = "0.53.2", features = ["tokio", "kad", "identify", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
+libp2p-quic = { version = "0.10.2", features = ["tokio"] }
 num_enum = "0.6.1"
 clap = { version = "4.3.21", features = ["derive"] }
 uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
@@ -28,6 +26,8 @@ base64 = "0.22.1"
 mongodb = "3.1.0"
 chrono = { version = "0.4.38", features = ["serde"] }
 risc0-zkvm = { version = "2.0", features = ["prove", "unstable"] }
+tokio = "1.45.1"
+tokio-stream = "0.1.17"
 
 peyk = { path = "../peyk" }
 

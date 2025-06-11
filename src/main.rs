@@ -8,8 +8,6 @@ use futures::{
     },
 };
 
-use async_std::stream;
-
 use std::{
     error::Error,
     time::Duration,
@@ -19,6 +17,9 @@ use std::{
     },
     future::IntoFuture,
 };
+
+use tokio::time::interval;
+use tokio_stream::wrappers::IntervalStream;
 
 use env_logger::Env;
 use log::{info, warn};
@@ -82,7 +83,7 @@ struct Cli {
     key_file: Option<String>,
 }
 
-#[async_std::main]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + 'static>> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info"))
         .init();
@@ -171,13 +172,19 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     swarm.listen_on("/ip6/::/tcp/20202".parse()?)?;
     swarm.listen_on("/ip6/::/udp/20202/quic-v1".parse()?)?;
 
-    let mut timer_peer_discovery = stream::interval(Duration::from_secs(5 * 60)).fuse();
+    let mut timer_peer_discovery = IntervalStream::new(
+        interval(Duration::from_secs(5 * 60))
+    )
+    .fuse();
     // ~5 secs is the time it takes for a rtx 3090 to prove 2m cycles
-    let mut timer_satisfy_job_prerequisities = stream::interval(Duration::from_secs(5 * 60)).fuse();
+    let mut timer_satisfy_job_prerequisities = IntervalStream::new(
+        interval(Duration::from_secs(5 * 60))
+    )
+    .fuse();
     loop {
         select! {
             // try to discover new peers
-            () = timer_peer_discovery.select_next_some() => {
+            _i = timer_peer_discovery.select_next_some() => {
                 if true == cli.dev {
                     continue;
                 }
@@ -189,7 +196,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .get_closest_peers(random_peer_id);
             },
 
-            () = timer_satisfy_job_prerequisities.select_next_some() => {
+            _i = timer_satisfy_job_prerequisities.select_next_some() => {
                 jobs.values()
                     .filter(|j| j.status == job::Status::WaitingForBlobs)
                     .for_each(|j| {
