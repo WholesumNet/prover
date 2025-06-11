@@ -1,31 +1,51 @@
+use std::collections::{
+    HashMap, BTreeMap
+};
 use libp2p::PeerId;
-use mongodb::bson::Bson;
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Status {    
+pub enum Status {
+    WaitingForBlobs,
+
     Running,
     
-    // param: proof's cid
-    ExecutionSucceeded(String),
+    ExecutionSucceded,
     
     // param: error message
     ExecutionFailed(String),
-
-    // param: failed upload retry attempts so far
-    UploadFailed(u32),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum JobType {
-    Prove(u32),
-    Join(String, String),
+pub enum Kind {
+    // param: claim digest
+    Keccak([u8; 32]),
+
+    // param: claim digest
+    Zkr([u8; 32]),
+
+    // param: batch id
+    Segment(u32),
+
+    // param: batch id
+    Join(u32),
+
     Groth16,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proof {
-    pub filepath: Option<String>,
+    // xxh3_128
+    pub hash: u128,
+
     pub blob: Vec<u8>
+}
+
+#[derive(Debug)]
+pub struct Token {
+    // xxh3_128
+    pub hash: u128,
+
+    pub owners: Vec<String>
 }
 
 // maintain lifecycle of a job
@@ -37,19 +57,24 @@ pub struct Job {
     // job_id as we know it: base_id+item_id
     pub id: String, 
 
-    pub working_dir: String,
+    // pub working_dir: String,
     
     // the client
     pub owner: PeerId,
 
     pub status: Status,
 
-    pub job_type: JobType,
+    pub kind: Kind,
+
+    pub input_blobs: BTreeMap<usize, Vec<u8>>,
+
+    // must be satisfied before proving can start
+    // <index, token>
+    pub prerequisites: BTreeMap<usize, Token>,
+    // inverse helper map to put received blobs
+    pub pending_blobs: HashMap<u128, usize>,
 
     // result of the job
-    pub proof: Option<Proof>,
-
-    // db oid
-    pub db_oid: Option<Bson>, 
+    pub proof: Option<Proof>
 }
 
