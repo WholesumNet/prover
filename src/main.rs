@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             let new_key = identity::Keypair::generate_ed25519();
             let bytes = new_key.to_protobuf_encoding().unwrap();
             let _bw = std::fs::write("./key.secret", bytes);
-            warn!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./key.secret");
+            warn!("No keys were supplied, so one is generated for you and saved to `./key.secret` file.");
             new_key
         }
     };    
@@ -304,7 +304,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         },
 
                     };
-                    info!("Received `{need:#?}` need...");
+                    info!("Received `{need:?}` need...");
                     match need {
                         NeedKind::Prove(_num_jobs) => {
                             let _req_id = swarm
@@ -658,7 +658,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 db_insert_futures.push(
                     col_proofs.insert_one(
                         db::Proof {
-                            client_job_id: job.base_id.clone(),
+                            client_job_id: job.base_id,
                             job_id: job.id.clone(),
                             kind: db::JobKind::Zkr(claim_digest),
                             owner: job.owner.to_string(),
@@ -713,7 +713,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     
                     _ => {
                         warn!("No batch id is available for `{:?}`.", job.kind);
-                        u32::MAX
+                        u128::MAX
                     }
                 };
                 let blob_hash = xxh3_128(&res.blob);
@@ -721,7 +721,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 db_insert_futures.push(
                     col_proofs.insert_one(
                         db::Proof {
-                            client_job_id: job.base_id.clone(),
+                            client_job_id: job.base_id,
                             job_id: job.id.clone(),
                             kind: db::JobKind::Segment(batch_id),
                             owner: job.owner.to_string(),

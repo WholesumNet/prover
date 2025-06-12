@@ -95,12 +95,11 @@ async fn aggregate_proofs(
                 }
             )
         }
-
-    };
+    };    
     blobs
         .into_iter()
         .skip(1)
-        .try_fold(first, |agg, r| join_proofs(agg, r))
+        .try_fold(first, |agg, r| join_proofs(agg, r))            
         .and_then(|proof|
             Ok(
                 ExecutionResult {
@@ -122,11 +121,16 @@ async fn aggregate_segments(
     job_id: String,
     blobs: Vec<Vec<u8>>
 ) -> Result<ExecutionResult, ExecutionError> {
-    info!("Aggregating segments for `{job_id}`");
+    info!(
+        "Aggregating segments for `{}`, `{}` in total.",
+        job_id,
+        blobs.len(),
+    );
     let mut receipts = Vec::new();
-    for blob in blobs.into_iter() {
+    for (i, blob) in blobs.into_iter().enumerate() {
         match prove_and_lift_segment(blob) {
             Ok(sr) => {
+                info!("`{i}th` segment was proved with success.");
                 receipts.push(sr)
             },
 
@@ -140,7 +144,11 @@ async fn aggregate_segments(
             }
         };        
     }
-    let first = receipts.remove(0);    
+    info!(
+        "Joining receipts, {} in total.",
+        receipts.len() - 1
+    );
+    let first = receipts.remove(0);
     receipts
         .into_iter()
         .try_fold(first, |agg, r| join_receipts(agg, r))

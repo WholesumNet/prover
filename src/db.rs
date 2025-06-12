@@ -8,9 +8,9 @@ pub enum JobKind {
 
     Zkr([u8; 32]),
 
-    Segment(u32),
+    Segment(u128),
 
-    Join(u32),
+    Join(u128),
     
     Groth16,
 }
@@ -18,7 +18,7 @@ pub enum JobKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proof {   
     // job_id assigned by the client 
-    pub client_job_id: String,
+    pub client_job_id: u128,
     // job_id from prover pov: job_id+item_id
     pub job_id: String,
 

@@ -24,10 +24,10 @@ pub enum Kind {
     Zkr([u8; 32]),
 
     // param: batch id
-    Segment(u32),
+    Segment(u128),
 
     // param: batch id
-    Join(u32),
+    Join(u128),
 
     Groth16,
 }
@@ -52,7 +52,7 @@ pub struct Token {
 #[derive(Debug)]
 pub struct Job {
     // job id as specified by the client
-    pub base_id: String,
+    pub base_id: u128,
 
     // job_id as we know it: base_id+item_id
     pub id: String, 
