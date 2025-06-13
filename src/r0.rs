@@ -79,7 +79,6 @@ async fn aggregate_proofs(
     job_id: String,
     blobs: Vec<Vec<u8>>
 ) -> Result<ExecutionResult, ExecutionError> {
-    info!("Aggregating proofs for `{job_id}`");
     let first = match 
         bincode::deserialize::<SuccinctReceipt<ReceiptClaim>>(
             &blobs[0]
@@ -121,11 +120,6 @@ async fn aggregate_segments(
     job_id: String,
     blobs: Vec<Vec<u8>>
 ) -> Result<ExecutionResult, ExecutionError> {
-    info!(
-        "Aggregating segments for `{}`, `{}` in total.",
-        job_id,
-        blobs.len(),
-    );
     let mut receipts = Vec::new();
     for (i, blob) in blobs.into_iter().enumerate() {
         match prove_and_lift_segment(blob) {
@@ -145,7 +139,7 @@ async fn aggregate_segments(
         };        
     }
     info!(
-        "Joining receipts, {} in total.",
+        "Joining receipts, `{}` operations in total.",
         receipts.len() - 1
     );
     let first = receipts.remove(0);
@@ -169,9 +163,17 @@ async fn aggregate_segments(
 pub async fn aggregate(
     job_id: String,
     blobs: Vec<Vec<u8>>,
-    are_blobs_segment: bool
+    blobs_are_segment: bool
 ) -> Result<ExecutionResult, ExecutionError> {
-    if are_blobs_segment {
+    info!(
+        "Aggregating: {}",
+        if blobs_are_segment {
+            format!("`{}` segment(s) to prove.", blobs.len())
+        } else {
+            format!("`{}` receipt(s) to join.", blobs.len())
+        }
+    );
+    if blobs_are_segment {
         aggregate_segments(job_id, blobs).await
     } else {
         aggregate_proofs(job_id, blobs).await

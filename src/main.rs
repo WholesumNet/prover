@@ -98,6 +98,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
     // let's maintain a list of jobs
     let mut jobs = HashMap::<String, job::Job>::new();
+    // once generated, aggregated proofs are held here
+    let mut proof_blobs = HashMap::<u128, Vec<u8>>::new();
     
     // pull jobs to completion
     let mut keccak_futures = FuturesUnordered::new();
@@ -176,7 +178,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
         interval(Duration::from_secs(5 * 60))
     )
     .fuse();
-    // ~5 secs is the time it takes for a rtx 3090 to prove 2m cycles
+    // it takes ~5s for a rtx 3090 to prove 2m cycles
     let mut timer_satisfy_job_prerequisities = IntervalStream::new(
         interval(Duration::from_secs(5 * 60))
     )
@@ -304,7 +306,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         },
 
                     };
-                    info!("Received `{need:?}` need...");
+                    info!("Received `{need:?}` need.");
                     match need {
                         NeedKind::Prove(_num_jobs) => {
                             let _req_id = swarm
@@ -340,17 +342,14 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     match request {
                         TransferBlob(hash) => {
                             //@ check db
-                            if let Some(job) = jobs.values()
-                                .filter(|j| j.status == job::Status::ExecutionSucceded)
-                                .find(|j| j.proof.as_ref().unwrap().hash == hash)
-                            {
+                            if let Some(blob) = proof_blobs.get(&hash) {
                                 let _req_id = swarm
                                     .behaviour_mut()
                                     .req_resp
                                     .send_response(
                                         channel,
                                         protocol::Response::BlobIsReady(
-                                            job.proof.as_ref().unwrap().blob.clone()
+                                            blob.clone()
                                         )
                                     );
                                 info!("Requested proof `{hash}` is found and sent back.");
@@ -381,7 +380,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             {
                                 let index = job.pending_blobs.remove(&hash).unwrap();
                                 let _ = job.prerequisites.remove(&index);
-                                job.input_blobs.insert(index, blob);
+                                job.input_blobs.insert(index, blob.clone());
+                                proof_blobs.insert(hash, blob);
                                 info!(
                                     "Received blob `{}` from `{:?}`",
                                     hash,
@@ -409,6 +409,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         protocol::Response::Job(compute_job) => {                            
                             match compute_job.kind {
                                 protocol::JobKind::Keccak(keccak_details) => {
+                                    info!(
+                                        "Received Keccak job from client: `{:?}`",
+                                        client_peer_id
+                                    );
                                     let prove_id = format!(
                                         "{}-{:?}",
                                         compute_job.id,
@@ -442,6 +446,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 },
 
                                 protocol::JobKind::Zkr(zkr_details) => {
+                                    info!(
+                                        "Received Zkr job from client: `{:?}`",
+                                        client_peer_id
+                                    );
                                     let prove_id = format!(
                                         "{}-{:?}",
                                         compute_job.id,
@@ -475,6 +483,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 }
 
                                 protocol::JobKind::Aggregate(agg_details) => {
+                                    info!(
+                                        "Received Aggregate job `{:?}` from client: `{:?}`",
+                                        agg_details.id,
+                                        client_peer_id
+                                    );
                                     let prove_id = format!(
                                         "{}-{}",
                                         compute_job.id,
@@ -490,19 +503,23 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             },
 
                                             InputBlob::Token(hash, owners) => {
-                                                prerequisites.insert(
-                                                    i, 
-                                                    job::Token {
-                                                        hash: hash,
-                                                        owners: owners
-                                                    }
-                                                );
-                                                pending_blobs.insert(hash, agg_details.id as usize);
+                                                if let Some(blob) = proof_blobs.get(&hash) {
+                                                    input_blobs.insert(i, blob.clone());
+                                                } else {                                                        
+                                                    prerequisites.insert(
+                                                        i, 
+                                                        job::Token {
+                                                            hash: hash,
+                                                            owners: owners
+                                                        }
+                                                    );
+                                                    pending_blobs.insert(hash, agg_details.id as usize);
+                                                }
                                             }
                                         };
                                     }
                                     let ready_for_proving = prerequisites.is_empty();
-                                    if ready_for_proving {
+                                    if ready_for_proving {                                        
                                         let cloned_blobs = input_blobs.values().cloned().collect();                                        
                                         aggregate_futures.push(
                                             r0::aggregate(
@@ -510,6 +527,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                 cloned_blobs,
                                                 agg_details.blobs_are_segment
                                             )
+                                        );
+                                    } else {
+                                        info!(
+                                            "The following blobs must be received for the job to start: `{:?}`",
+                                            prerequisites.values().map(|token| token.hash).collect::<Vec<_>>()
                                         );
                                     }
                                     jobs.insert(
@@ -537,6 +559,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 },
                                 
                                 protocol::JobKind::Groth16(groth16_details) => {
+                                    info!(
+                                        "Received Groth16 job from client: `{:?}`",
+                                        client_peer_id
+                                    );
                                     let groth16_id = format!("{}-g16",compute_job.id);
                                     // keep track of running jobs                
                                     jobs.insert(                    
@@ -736,9 +762,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 job.proof = Some(
                     job::Proof {
                         hash: blob_hash,
-                        blob: res.blob
+                        blob: res.blob.clone()
                     }
                 );
+                proof_blobs.insert(blob_hash, res.blob);
 
                 let _ = swarm
                     .behaviour_mut()
