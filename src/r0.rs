@@ -139,7 +139,7 @@ async fn aggregate_segments(
         };        
     }
     info!(
-        "Joining receipts, `{}` operations in total.",
+        "Joining receipts, `{}` operation(s) in total.",
         receipts.len() - 1
     );
     let first = receipts.remove(0);

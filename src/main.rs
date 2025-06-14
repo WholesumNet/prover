@@ -352,7 +352,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             blob.clone()
                                         )
                                     );
-                                info!("Requested proof `{hash}` is found and sent back.");
+                                info!("Requested blob `{hash}` is found and sent back.");
+                            } else {
+                                warn!("Requested blob `{hash}` is not found.");
                             }
                         },
 
@@ -418,6 +420,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         compute_job.id,
                                         keccak_details.claim_digest
                                     );
+                                    if jobs.contains_key(&prove_id) {
+                                        warn!("Ignored duplicate job: `{prove_id}`");
+                                        continue
+                                    }
                                     // keep track of running jobs                
                                     jobs.insert(                    
                                         prove_id.clone(),
