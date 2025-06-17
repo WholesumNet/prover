@@ -17,11 +17,7 @@ pub enum Status {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Kind {
-    // param: claim digest
-    Keccak([u8; 32]),
-
-    // param: claim digest
-    Zkr([u8; 32]),
+    Assumption(u128),
 
     // param: batch id
     Segment(u128),
@@ -29,7 +25,7 @@ pub enum Kind {
     // param: batch id
     Join(u128),
 
-    Groth16,
+    Groth16(u128),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +41,7 @@ pub struct Token {
     // xxh3_128
     pub hash: u128,
 
-    pub owners: Vec<String>
+    pub owners: Vec<Vec<u8>>
 }
 
 // maintain lifecycle of a job

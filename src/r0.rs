@@ -124,7 +124,7 @@ async fn aggregate_segments(
     for (i, blob) in blobs.into_iter().enumerate() {
         match prove_and_lift_segment(blob) {
             Ok(sr) => {
-                info!("`{i}th` segment was proved with success.");
+                info!("`{i}th` segment is proved with success.");
                 receipts.push(sr)
             },
 
@@ -180,68 +180,80 @@ pub async fn aggregate(
     }
 }
 
-pub async fn prove_keccak(
-    job_id: String,
-    blob: Vec<u8>
-) -> Result<ExecutionResult, ExecutionError> { 
-    info!("Proving keccak request for `{job_id}`");   
-    ApiClient::from_env()
-    .and_then(|r0_client| {        
-
-        let keccack_request_object: KeccakRequestObject = bincode::deserialize(&blob)?;
-        let prove_keccak_request = ProveKeccakRequest {
-            claim_digest: keccack_request_object.claim_digest.into(),
-            po2: keccack_request_object.po2,
-            control_root: keccack_request_object.control_root.into(),
-            input: keccack_request_object.input
-        };
-        r0_client
-            .prove_keccak(
-                prove_keccak_request,
-                AssetRequest::Inline,
-            )
-            .and_then(|keccak_receipt: SuccinctReceipt<Unknown>| {
-                Ok(ExecutionResult {
-                    job_id: job_id.clone(),
-                    blob: bincode::serialize(&keccak_receipt)?
-                })        
-            })        
-    })
-    .map_err(|e| ExecutionError {
-        job_id: job_id.clone(),
-        err_msg: e.to_string()
-    })    
+fn prove_keccak(
+    keccak_req: ProveKeccakRequest,
+) -> anyhow::Result<SuccinctReceipt<Unknown>> { 
+    ApiClient::from_env()?
+        .prove_keccak(keccak_req, AssetRequest::Inline)
 }
 
-pub async fn prove_zkr(
+fn prove_zkr(
+    zkr_req: ProveZkrRequest
+) -> anyhow::Result<SuccinctReceipt<Unknown>> {
+    ApiClient::from_env()?
+        .prove_zkr(zkr_req, AssetRequest::Inline)
+}
+
+pub async fn prove_assumption(
     job_id: String,
-    blob: Vec<u8>
-) -> Result<ExecutionResult, ExecutionError> {
-    info!("Proving zkr request for `{job_id}`");
-    ApiClient::from_env()
-    .and_then(|r0_client| {        
-        let zkr_request_object: ZkrRequestObject = bincode::deserialize(&blob)?;
-        let prove_zkr_request = ProveZkrRequest {
-            claim_digest: zkr_request_object.claim_digest.into(),
-            control_id: zkr_request_object.control_id.into(),
-            input: zkr_request_object.input
+    blob: Vec<u8>,
+) -> anyhow::Result<ExecutionResult, ExecutionError> {
+    if let Ok(k) =  bincode::deserialize::<KeccakRequestObject>(&blob) {
+        // it's keccak
+        let keccak_req = ProveKeccakRequest {
+            claim_digest: k.claim_digest.into(),
+            po2: k.po2,
+            control_root: k.control_root.into(),
+            input: k.input
         };
-        r0_client
-            .prove_zkr(
-                prove_zkr_request,
-                AssetRequest::Inline,
-            )
-            .and_then(|zkr_receipt: SuccinctReceipt<Unknown>| {
-                Ok(ExecutionResult {
+        info!(
+            "Proving Keccak request `{:?}` for `{}`",
+            keccak_req.claim_digest,
+            job_id
+        );
+        prove_keccak(keccak_req)
+            .and_then(|proof| Ok(
+                ExecutionResult {
                     job_id: job_id.clone(),
-                    blob: bincode::serialize(&zkr_receipt)?
-                })        
-            })        
-    })
-    .map_err(|e| ExecutionError {
-        job_id: job_id.clone(),
-        err_msg: e.to_string()
-    })    
+                    blob: bincode::serialize(&proof)?
+                })
+            )
+            .map_err(|e| ExecutionError {
+                job_id: job_id.clone(),
+                err_msg: e.to_string()
+            })
+    } else if let Ok(z) = bincode::deserialize::<ZkrRequestObject>(&blob) {
+        // or zkr
+        let zkr_req = ProveZkrRequest {
+            claim_digest: z.claim_digest.into(),
+            control_id: z.control_id.into(),
+            input: z.input
+        };
+        info!(
+            "Proving Zkr request `{:?}` for `{}`",
+            zkr_req.claim_digest,
+            job_id
+        );
+        prove_zkr(zkr_req)
+            .and_then(|proof| Ok(
+                ExecutionResult {
+                    job_id: job_id.clone(),
+                    blob: bincode::serialize(&proof)?
+                })
+            )
+            .map_err(|e| ExecutionError {
+                job_id: job_id.clone(),
+                err_msg: e.to_string()
+            })
+    } else {
+        // or an invalid blob
+        Err(
+            ExecutionError {
+                job_id: job_id.clone(),
+                err_msg: "Invalid blob".to_string()
+            }
+        )
+    }
 }
 
 pub async fn to_groth16(
@@ -271,7 +283,7 @@ pub async fn to_groth16(
 
         Ok(ExecutionResult {
             job_id: job_id.clone(),
-            blob: bincode::serialize(&groth16_proof)?,
+            blob: bincode::serialize(&groth16_proof)?
         })
     })
     .map_err(|e| ExecutionError {

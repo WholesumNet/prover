@@ -4,13 +4,11 @@ use serde::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobKind {
-    Keccak([u8; 32]),
+    Assumption(String),
 
-    Zkr([u8; 32]),
+    Segment(String),
 
-    Segment(u128),
-
-    Join(u128),
+    Join(String),
     
     Groth16,
 }
@@ -18,17 +16,16 @@ pub enum JobKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proof {   
     // job_id assigned by the client 
-    pub client_job_id: u128,
+    pub client_job_id: String,
     // job_id from prover pov: job_id+item_id
     pub job_id: String,
 
     pub kind: JobKind,
 
     // the client
-    pub owner: String,
+    pub owner: Vec<u8>,
 
     pub input_blobs: Vec<Vec<u8>>,    
     pub blob: Vec<u8>,    
-    pub hash: u128,
-
+    pub hash: String,
 }
