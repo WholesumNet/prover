@@ -202,33 +202,29 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .filter(|j| j.status == job::Status::WaitingForBlobs)
                     .for_each(|j| {
                         j.prerequisites.values()
-                            .for_each(|token| {
-                                token.owners
-                                    .iter()
-                                    .for_each(|owner| {
-                                        //@ move peer_id from string calculation to when job is being created
-                                        let peer_id = match PeerId::from_bytes(owner) {
-                                            Ok(p) => p,
+                            .for_each(|token| {                                
+                                //@ move peer_id from string calculation to when job is being created
+                                let peer_id = match PeerId::from_bytes(&token.owner) {
+                                    Ok(p) => p,
 
-                                            Err(e) => {
-                                                warn!("PeerId is invalid: {owner:?}: {e:?}");
-                                                return
-                                            }
-                                        };
-                                        let _req_id = swarm
-                                            .behaviour_mut()
-                                            .req_resp
-                                            .send_request(
-                                                &peer_id,
-                                                TransferBlob(token.hash)
-                                            );
-                                        info!(
-                                            "Requested transfer of blob `{}` from `{:?}`",
-                                            token.hash,
-                                            owner
-                                        );
-                                    });
-                            })
+                                    Err(e) => {
+                                        warn!("PeerId is invalid: {e:?}");
+                                        return
+                                    }
+                                };
+                                let _req_id = swarm
+                                    .behaviour_mut()
+                                    .req_resp
+                                    .send_request(
+                                        &peer_id,
+                                        TransferBlob(token.hash)
+                                    );
+                                info!(
+                                    "Requested transfer of blob `{}` from `{}`",
+                                    token.hash,
+                                    peer_id
+                                );
+                            });
                     });
             }
 
@@ -305,7 +301,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         },
 
                     };
-                    info!("Received `{need:?}` need.");
+                    info!("Gossip: need `{need:?}`");
                     match need {
                         NeedKind::Prove(_num_jobs) => {
                             let _req_id = swarm
@@ -411,7 +407,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             match compute_job.kind {
                                 protocol::JobKind::Assumption(assumption_details) => {
                                     info!(
-                                        "Received assumption job from client: `{:?}`",
+                                        "Received assumption job from client `{}`",
                                         client_peer_id
                                     );
                                     let (batch_id, blob) = {
@@ -464,7 +460,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
                                 protocol::JobKind::Aggregate(agg_details) => {
                                     info!(
-                                        "Received Aggregate job `{:?}` from client: `{:?}`",
+                                        "Received Aggregate job `{}` from client `{}`",
                                         agg_details.id,
                                         client_peer_id
                                     );
@@ -482,7 +478,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                 input_blobs.insert(i, b);
                                             },
 
-                                            InputBlob::Token(hash, owners) => {
+                                            InputBlob::Token(hash, owner) => {
                                                 if let Some(blob) = proof_blobs.get(&hash) {
                                                     input_blobs.insert(i, blob.clone());
                                                 } else {                                                        
@@ -490,7 +486,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                         i, 
                                                         job::Token {
                                                             hash: hash,
-                                                            owners: owners
+                                                            owner: owner
                                                         }
                                                     );
                                                     pending_blobs.insert(hash, agg_details.id as usize);
@@ -510,7 +506,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         );
                                     } else {
                                         info!(
-                                            "The following blobs must be received for the job to start: `{:?}`",
+                                            "The following blobs must be received for the job to start proving: `{:?}`",
                                             prerequisites.values().map(|token| token.hash).collect::<Vec<_>>()
                                         );
                                     }
@@ -540,10 +536,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 
                                 protocol::JobKind::Groth16(groth16_details) => {
                                     info!(
-                                        "Received Groth16 job from client: `{:?}`",
+                                        "Received Groth16 job from client `{}`",
                                         client_peer_id
-                                    );
-                                    let groth16_id = format!("{}-g16",compute_job.id);                                    
+                                    );                                    
                                     let (batch_id, blob) = {
                                         let ib = &groth16_details.batch[0];
                                         if let protocol::InputBlob::Blob(b) = &ib.1 {

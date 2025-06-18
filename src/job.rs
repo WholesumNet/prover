@@ -41,7 +41,7 @@ pub struct Token {
     // xxh3_128
     pub hash: u128,
 
-    pub owners: Vec<Vec<u8>>
+    pub owner: Vec<u8>
 }
 
 // maintain lifecycle of a job
