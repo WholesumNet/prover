@@ -393,7 +393,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 if let Some(j) = ready_jobs.pop_front() {
                                     prove_futures.push(
                                         r0::prove(
-                                            j.id.clone(),
                                             j.input_blobs.values().cloned().collect(),
                                             j.kind.clone()
                                         )
@@ -526,7 +525,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 if let Some(j) = ready_jobs.pop_front() {
                                     prove_futures.push(
                                         r0::prove(
-                                            j.id.clone(),
                                             j.input_blobs.values().cloned().collect(),
                                             j.kind.clone()
                                         )
@@ -549,7 +547,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     warn!("Failed to prove job `{}`: `{:?}`", job.id, e);
                     continue
                 }
-                let result = er.unwrap();
+                let proof_blob = er.unwrap();
                 let mut job = active_job.take().unwrap();
                 let (batch_id, proof_kind) = match job.kind {
                     job::Kind::Segment(bid) => {
@@ -564,15 +562,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
                     job::Kind::Assumption(bid) => {
                         info!("Assumption `{}` is proved.`", job.id);
-                        (bid, ProofKind::Assumption(bid, result.blob.clone()))
+                        (bid, ProofKind::Assumption(bid, proof_blob.clone()))
                     },
 
                     job::Kind::Groth16(bid) => {
                         info!("Groth16 extraction `{}` is finished.", job.id);
-                        (bid, ProofKind::Groth16(bid, result.blob.clone()))
+                        (bid, ProofKind::Groth16(bid, proof_blob.clone()))
                     },
                 };
-                let blob_hash = xxh3_128(&result.blob);
+                let blob_hash = xxh3_128(&proof_blob);
                 // record to db                
                 db_insert_futures.push(
                     col_proofs.insert_one(
@@ -582,7 +580,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             kind: db::JobKind::Segment(batch_id.to_string()),
                             owner: job.owner.to_bytes(),
                             input_blobs: job.input_blobs.values().cloned().collect(),
-                            blob: result.blob.clone(),    
+                            blob: proof_blob.clone(),    
                             hash: blob_hash.to_string(),                
                         }
                     )
@@ -591,10 +589,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 job.proof = Some(
                     job::Proof {
                         hash: blob_hash,
-                        blob: result.blob.clone()
+                        blob: proof_blob.clone()
                     }
                 );
-                proof_blobs.insert(blob_hash, result.blob);
+                proof_blobs.insert(blob_hash, proof_blob);
 
                 let _req_id = swarm
                     .behaviour_mut()
@@ -613,7 +611,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 if let Some(j) = ready_jobs.pop_front() {
                     prove_futures.push(
                         r0::prove(
-                            j.id.clone(),
                             j.input_blobs.values().cloned().collect(),
                             j.kind.clone()
                         )
