@@ -3,27 +3,15 @@ use std::collections::{
 };
 use libp2p::PeerId;
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Status {
-    WaitingForBlobs,
-
-    Running,
-    
-    ExecutionSucceded,
-    
-    // param: error message
-    ExecutionFailed(String),
-}
-
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
-    Assumption(u128),
-
     // param: batch id
+
     Segment(u128),
 
-    // param: batch id
     Join(u128),
+
+    Assumption(u128),
 
     Groth16(u128),
 }
@@ -36,7 +24,7 @@ pub struct Proof {
     pub blob: Vec<u8>
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Token {
     // xxh3_128
     pub hash: u128,
@@ -44,8 +32,7 @@ pub struct Token {
     pub owner: Vec<u8>
 }
 
-// maintain lifecycle of a job
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Job {
     // job id as specified by the client
     pub base_id: u128,
@@ -57,8 +44,6 @@ pub struct Job {
     
     // the client
     pub owner: PeerId,
-
-    pub status: Status,
 
     pub kind: Kind,
 
@@ -73,4 +58,3 @@ pub struct Job {
     // result of the job
     pub proof: Option<Proof>
 }
-

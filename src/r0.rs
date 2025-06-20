@@ -10,10 +10,12 @@ use risc0_zkvm::{
 use log::info;
 use anyhow;
 
+use crate::job;
+use job::Kind;
+
 use peyk::protocol::{
     KeccakRequestObject, ZkrRequestObject
 };
-
 
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
@@ -160,26 +162,6 @@ async fn aggregate_segments(
         })    
 }
 
-pub async fn aggregate(
-    job_id: String,
-    blobs: Vec<Vec<u8>>,
-    blobs_are_segment: bool
-) -> Result<ExecutionResult, ExecutionError> {
-    info!(
-        "Aggregating: {}",
-        if blobs_are_segment {
-            format!("`{}` segment(s) to prove.", blobs.len())
-        } else {
-            format!("`{}` receipt(s) to join.", blobs.len())
-        }
-    );
-    if blobs_are_segment {
-        aggregate_segments(job_id, blobs).await
-    } else {
-        aggregate_proofs(job_id, blobs).await
-    }
-}
-
 fn prove_keccak(
     keccak_req: ProveKeccakRequest,
 ) -> anyhow::Result<SuccinctReceipt<Unknown>> { 
@@ -194,7 +176,7 @@ fn prove_zkr(
         .prove_zkr(zkr_req, AssetRequest::Inline)
 }
 
-pub async fn prove_assumption(
+async fn prove_assumption(
     job_id: String,
     blob: Vec<u8>,
 ) -> anyhow::Result<ExecutionResult, ExecutionError> {
@@ -256,7 +238,7 @@ pub async fn prove_assumption(
     }
 }
 
-pub async fn to_groth16(
+async fn to_groth16(
     job_id: String,
     blob: Vec<u8>
 ) -> anyhow::Result<ExecutionResult, ExecutionError> {
@@ -290,4 +272,30 @@ pub async fn to_groth16(
         job_id: job_id.clone(),
         err_msg: e.to_string()
     })
+}
+
+pub async fn prove(
+    job_id: String,
+    blobs: Vec<Vec<u8>>,
+    kind: Kind
+) -> anyhow::Result<ExecutionResult, ExecutionError> {    
+    match kind {
+        Kind::Segment(_) => {
+            aggregate_segments(job_id, blobs).await
+        },
+
+        Kind::Join(_) => {
+            aggregate_proofs(job_id, blobs).await
+        },        
+
+        Kind::Assumption(_) => {            
+            let first = blobs.into_iter().next().unwrap();
+            prove_assumption(job_id, first).await
+        },
+
+        Kind::Groth16(_) => {
+            let first = blobs.into_iter().next().unwrap();
+            to_groth16(job_id, first).await
+        }
+    }
 }

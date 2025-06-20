@@ -13,7 +13,8 @@ use std::{
     time::Duration,
     collections::{
         HashMap,
-        BTreeMap
+        BTreeMap,
+        VecDeque
     },
     future::IntoFuture,
 };
@@ -53,8 +54,9 @@ use peyk::{
     protocol,
     protocol::{
         NeedKind,
-        ProofToken,
         InputBlob,
+        ProofToken,
+        ProofKind
     },
     protocol::Request::{
         WouldProve,
@@ -63,6 +65,7 @@ use peyk::{
 };
 
 mod job;
+use job::Job;
 mod r0;
 mod db;
 
@@ -96,15 +99,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     // setup mongodb
     let db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
-    // let's maintain a list of jobs
-    let mut jobs = HashMap::<String, job::Job>::new();
+    // maintain jobs
+    let mut active_job = None;
+    let mut ready_jobs = VecDeque::new();
+    let mut pending_jobs = Vec::new();
     // once generated, aggregated proofs are held here
     let mut proof_blobs = HashMap::<u128, Vec<u8>>::new();
-    
+
     // pull jobs to completion
-    let mut assumption_futures = FuturesUnordered::new();
-    let mut aggregate_futures = FuturesUnordered::new();
-    let mut groth16_futures = FuturesUnordered::new();
+    let mut prove_futures = FuturesUnordered::new();
 
     let col_proofs = db_client
         .database("wholesum_prover")
@@ -132,11 +135,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     // Libp2p swarm 
     let mut swarm = peyk::p2p::setup_swarm(&local_key).await?;
     let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
-    let _ = 
-        swarm
-            .behaviour_mut()
-            .gossipsub
-            .subscribe(&topic);
+    let _ = swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&topic);
 
     // bootstrap 
     if false == cli.dev {
@@ -198,11 +200,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             },
 
             _i = timer_satisfy_job_prerequisities.select_next_some() => {
-                jobs.values()
-                    .filter(|j| j.status == job::Status::WaitingForBlobs)
-                    .for_each(|j| {
+                pending_jobs
+                    .iter()                    
+                    .for_each(|j: &Job| {
                         j.prerequisites.values()
-                            .for_each(|token| {                                
+                            .for_each(|token| {
                                 //@ move peer_id from string calculation to when job is being created
                                 let peer_id = match PeerId::from_bytes(&token.owner) {
                                     Ok(p) => p,
@@ -371,34 +373,32 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     match response {
                         protocol::Response::BlobIsReady(blob) => {
                             let hash = xxh3_128(&blob);
-                            if let Some(job) = jobs.values_mut()
-                                .filter(|j| j.status == job::Status::WaitingForBlobs)
-                                .find(|j| j.pending_blobs.contains_key(&hash))
-                            {
+                            pending_jobs.retain_mut(|job| { 
+                                if !job.pending_blobs.contains_key(&hash) {
+                                    return true
+                                }
                                 let index = job.pending_blobs.remove(&hash).unwrap();
                                 let _ = job.prerequisites.remove(&index);
                                 job.input_blobs.insert(index, blob.clone());
-                                proof_blobs.insert(hash, blob);
-                                info!(
-                                    "Received blob `{}` from `{:?}`",
-                                    hash,
-                                    client_peer_id
-                                );
+                                proof_blobs.insert(hash, blob.clone());
+                                info!("Received blob `{hash}` from `{client_peer_id}`");
                                 if job.prerequisites.is_empty() {
                                     info!("Job {} is ready to run.", job.id);
-                                    let input_blobs = job.input_blobs.values().cloned().collect();
-                                    job.status = job::Status::Running;
-                                    let blobs_are_segment = if let job::Kind::Segment(_) = job.kind {
-                                        true
-                                    } else if let job::Kind::Join(_) = job.kind {
-                                        false
-                                    } else {
-                                        warn!("Invlid job kind for aggregate: `{:?}`", job.kind);
-                                        continue
-                                    };
-                                    aggregate_futures.push(
-                                        r0::aggregate(job.id.clone(), input_blobs, blobs_are_segment)
-                                    );                                    
+                                    ready_jobs.push_back(job.clone());
+                                }
+                                !job.prerequisites.is_empty()
+                            });
+                            if active_job.is_none() {
+                                // prove it
+                                if let Some(j) = ready_jobs.pop_front() {
+                                    prove_futures.push(
+                                        r0::prove(
+                                            j.id.clone(),
+                                            j.input_blobs.values().cloned().collect(),
+                                            j.kind.clone()
+                                        )
+                                    );
+                                    active_job = Some(j);
                                 }
                             }
                         },
@@ -407,7 +407,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             match compute_job.kind {
                                 protocol::JobKind::Assumption(assumption_details) => {
                                     info!(
-                                        "Received assumption job from client `{}`",
+                                        "Received assumption job from peer `{}`",
                                         client_peer_id
                                     );
                                     let (batch_id, blob) = {
@@ -421,53 +421,26 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             );
                                             continue
                                         }
-                                    };
-                                    let prove_id = format!(
-                                        "{}-{}",
-                                        compute_job.id,
-                                        batch_id
-                                    );
-                                    if jobs.contains_key(&prove_id) {
-                                        warn!("Ignored duplicate job: `{prove_id}`");
-                                        continue
-                                    }
-                                    // run it
-                                    //@ use reference of blobs instead
-                                    assumption_futures.push(
-                                        r0::prove_assumption(
-                                            prove_id.clone(),
-                                            blob.clone() 
-                                        )
-                                    );
-                                    // keep track of running jobs                
-                                    jobs.insert(                    
-                                        prove_id.clone(),
-                                        job::Job {
-                                            base_id: compute_job.id,
-                                            id: prove_id.clone(),
-                                            owner: client_peer_id,
-                                            status: job::Status::Running,
-                                            kind: job::Kind::Assumption(batch_id),
-                                            input_blobs: BTreeMap::from([
-                                                (0, blob)
-                                            ]),
-                                            prerequisites: BTreeMap::new(),
-                                            pending_blobs: HashMap::new(),
-                                            proof: None,
-                                        },
-                                    );
+                                    };                                    
+                                    ready_jobs.push_back(Job {
+                                        base_id: compute_job.id,
+                                        id: format!("{}-{}", compute_job.id, batch_id),
+                                        owner: client_peer_id,
+                                        kind: job::Kind::Assumption(batch_id),
+                                        input_blobs: BTreeMap::from([
+                                            (0, blob)
+                                        ]),
+                                        prerequisites: BTreeMap::new(),
+                                        pending_blobs: HashMap::new(),
+                                        proof: None,
+                                    });
                                 },                                
 
                                 protocol::JobKind::Aggregate(agg_details) => {
                                     info!(
-                                        "Received Aggregate job `{}` from client `{}`",
+                                        "Received aggregate job `{}` from peer `{}`",
                                         agg_details.id,
                                         client_peer_id
-                                    );
-                                    let prove_id = format!(
-                                        "{}-{}",
-                                        compute_job.id,
-                                        agg_details.id
                                     );
                                     let mut input_blobs = BTreeMap::new();
                                     let mut prerequisites = BTreeMap::new();
@@ -495,48 +468,30 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         };
                                     }
                                     let ready_for_proving = prerequisites.is_empty();
-                                    if ready_for_proving {                                        
-                                        let cloned_blobs = input_blobs.values().cloned().collect();                                        
-                                        aggregate_futures.push(
-                                            r0::aggregate(
-                                                prove_id.clone(),
-                                                cloned_blobs,
-                                                agg_details.blobs_are_segment
-                                            )
-                                        );
-                                    } else {
-                                        info!(
-                                            "The following blobs must be received for the job to start proving: `{:?}`",
-                                            prerequisites.values().map(|token| token.hash).collect::<Vec<_>>()
-                                        );
-                                    }
-                                    jobs.insert(
-                                        prove_id.clone(),
-                                        job::Job {
-                                            base_id: compute_job.id,
-                                            id: prove_id,
-                                            owner: client_peer_id,
-                                            status: if ready_for_proving {
-                                                job::Status::Running
-                                            } else {
-                                                job::Status::WaitingForBlobs
-                                            },
-                                            kind: if agg_details.blobs_are_segment { 
-                                                job::Kind::Segment(agg_details.id)
-                                            } else {
-                                                job::Kind::Join(agg_details.id)
-                                            },
-                                            input_blobs: input_blobs,
-                                            prerequisites: prerequisites,
-                                            pending_blobs: pending_blobs,
-                                            proof: None,
-                                        }
-                                    );
+                                    let job = Job {
+                                        base_id: compute_job.id,
+                                        id: format!("{}-{}", compute_job.id, agg_details.id),
+                                        owner: client_peer_id,
+                                        kind: if agg_details.blobs_are_segment { 
+                                            job::Kind::Segment(agg_details.id)
+                                        } else {
+                                            job::Kind::Join(agg_details.id)
+                                        },
+                                        input_blobs: input_blobs,
+                                        prerequisites: prerequisites,
+                                        pending_blobs: pending_blobs,
+                                        proof: None
+                                    };
+                                    if ready_for_proving {
+                                        ready_jobs.push_back(job);                                        
+                                    } else {                                        
+                                        pending_jobs.push(job);
+                                    }                                    
                                 },
                                 
                                 protocol::JobKind::Groth16(groth16_details) => {
                                     info!(
-                                        "Received Groth16 job from client `{}`",
+                                        "Received Groth16 job from peer `{}`",
                                         client_peer_id
                                     );                                    
                                     let (batch_id, blob) = {
@@ -551,41 +506,33 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             continue
                                         }
                                     };
-                                    let prove_id = format!(
-                                        "{}-{}",
-                                        compute_job.id,
-                                        batch_id
-                                    );
-                                    if jobs.contains_key(&prove_id) {
-                                        warn!("Ignored duplicate job: `{prove_id}`");
-                                        continue
-                                    }
-                                    // run it
-                                    //@ use reference of blobs instead
-                                    groth16_futures.push(
-                                        r0::to_groth16(
-                                            prove_id.clone(),
-                                            blob.clone() 
+                                    // keep track of running jobs                
+                                    ready_jobs.push_back(Job {
+                                        base_id: compute_job.id,
+                                        id: format!("{}-{}", compute_job.id, batch_id),
+                                        owner: client_peer_id,
+                                        kind: job::Kind::Groth16(batch_id),
+                                        input_blobs: BTreeMap::from([
+                                            (0, blob)
+                                        ]),
+                                        prerequisites: BTreeMap::new(),
+                                        pending_blobs: HashMap::new(),
+                                        proof: None,
+                                    });
+                                }
+                            };
+                            if active_job.is_none() {
+                                // prove it
+                                if let Some(j) = ready_jobs.pop_front() {
+                                    prove_futures.push(
+                                        r0::prove(
+                                            j.id.clone(),
+                                            j.input_blobs.values().cloned().collect(),
+                                            j.kind.clone()
                                         )
                                     );
-                                    // keep track of running jobs                
-                                    jobs.insert(                    
-                                        prove_id.clone(),
-                                        job::Job {
-                                            base_id: compute_job.id,
-                                            id: prove_id.clone(),
-                                            owner: client_peer_id,
-                                            status: job::Status::Running,
-                                            kind: job::Kind::Groth16(batch_id),
-                                            input_blobs: BTreeMap::from([
-                                                (0, blob)
-                                            ]),
-                                            prerequisites: BTreeMap::new(),
-                                            pending_blobs: HashMap::new(),
-                                            proof: None,
-                                        },
-                                    );
-                                },
+                                    active_job = Some(j);
+                                }
                             }
                         }
                     }
@@ -596,88 +543,36 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 },
             },
 
-            // assumption is proved
-            er = assumption_futures.select_next_some() => {
-                if let Err(failed) = er {
-                    warn!("Failed to run prove keccak job: `{:#?}`", failed);       
-                    //@ wtd with job?
-                    let job = jobs.get_mut(&failed.job_id).unwrap();
-                    job.status = job::Status::ExecutionFailed(failed.err_msg);
-                    continue;
-                }
-                let res = er.unwrap();
-                let job = jobs.get_mut(&res.job_id).unwrap();
-                job.status = job::Status::ExecutionSucceded;
-                info!("Prove assumption is finished for `{}`", res.job_id);
-                let batch_id = if let job::Kind::Assumption(id) = job.kind {
-                    id
-                } else {
-                    warn!("Kind must be assumption but is `{:?}`", job.kind);
+            er = prove_futures.select_next_some() => {
+                if let Err(e) = er {
+                    let job = active_job.take().unwrap();                    
+                    warn!("Failed to prove job `{}`: `{:?}`", job.id, e);
                     continue
-                };
-                let blob_hash = xxh3_128(&res.blob);
-                // record to db                
-                db_insert_futures.push(
-                    col_proofs.insert_one(
-                        db::Proof {
-                            client_job_id: job.base_id.to_string(),
-                            job_id: job.id.clone(),
-                            kind: db::JobKind::Assumption(batch_id.to_string()),
-                            owner: job.owner.to_bytes(),
-                            input_blobs: job.input_blobs.values().cloned().collect(),
-                            blob: res.blob.clone(),    
-                            hash: blob_hash.to_string(),                
-                        }
-                    )
-                    .into_future()
-                );
-                job.proof = Some(
-                    job::Proof {
-                        hash: blob_hash,
-                        blob: res.blob.clone()
-                    }
-                );
-
-                let _ = swarm
-                    .behaviour_mut()
-                    .req_resp
-                    .send_request(
-                        &job.owner,
-                        protocol::Request::ProofIsReady(
-                            ProofToken {
-                                job_id: job.base_id.clone(),
-                                kind: protocol::ProofKind::Assumption(
-                                    batch_id,
-                                    res.blob
-                                ),
-                                hash: blob_hash
-                            }
-                        )
-                    ); 
-            },            
-
-            // batch is proved
-            er = aggregate_futures.select_next_some() => {
-                if let Err(failed) = er {
-                    warn!("Failed to run the prove job: `{:#?}`", failed);       
-                    //@ wtd with job?
-                    let job = jobs.get_mut(&failed.job_id).unwrap();
-                    job.status = job::Status::ExecutionFailed(failed.err_msg);
-                    continue;
                 }
-                let res = er.unwrap();
-                let job = jobs.get_mut(&res.job_id).unwrap();
-                job.status = job::Status::ExecutionSucceded;
-                info!("Aggregate job `{}` is proved.", res.job_id);
-                let batch_id = match job.kind { 
-                    job::Kind::Segment(id) | job::Kind::Join(id) => id,
-                    
-                    _ => {
-                        warn!("No batch id is available for `{:?}`.", job.kind);
-                        u128::MAX
-                    }
+                let result = er.unwrap();
+                let mut job = active_job.take().unwrap();
+                let (batch_id, proof_kind) = match job.kind {
+                    job::Kind::Segment(bid) => {
+                        info!("Segment aggregate `{}` is proved", job.id);
+                        (bid, ProofKind::Aggregate(bid))
+                    },
+
+                    job::Kind::Join(bid) => {
+                        info!("Join aggregate `{}` is proved.", job.id);
+                        (bid, ProofKind::Aggregate(bid))
+                    },
+
+                    job::Kind::Assumption(bid) => {
+                        info!("Assumption `{}` is proved.`", job.id);
+                        (bid, ProofKind::Assumption(bid, result.blob.clone()))
+                    },
+
+                    job::Kind::Groth16(bid) => {
+                        info!("Groth16 extraction `{}` is finished.", job.id);
+                        (bid, ProofKind::Groth16(bid, result.blob.clone()))
+                    },
                 };
-                let blob_hash = xxh3_128(&res.blob);
+                let blob_hash = xxh3_128(&result.blob);
                 // record to db                
                 db_insert_futures.push(
                     col_proofs.insert_one(
@@ -687,22 +582,21 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             kind: db::JobKind::Segment(batch_id.to_string()),
                             owner: job.owner.to_bytes(),
                             input_blobs: job.input_blobs.values().cloned().collect(),
-                            blob: res.blob.clone(),
-                            hash: blob_hash.to_string(),
+                            blob: result.blob.clone(),    
+                            hash: blob_hash.to_string(),                
                         }
                     )
                     .into_future()
                 );
-
                 job.proof = Some(
                     job::Proof {
                         hash: blob_hash,
-                        blob: res.blob.clone()
+                        blob: result.blob.clone()
                     }
                 );
-                proof_blobs.insert(blob_hash, res.blob);
+                proof_blobs.insert(blob_hash, result.blob);
 
-                let _ = swarm
+                let _req_id = swarm
                     .behaviour_mut()
                     .req_resp
                     .send_request(
@@ -710,71 +604,24 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         protocol::Request::ProofIsReady(
                             ProofToken {
                                 job_id: job.base_id.clone(),
-                                kind: protocol::ProofKind::Aggregate(batch_id),
+                                kind: proof_kind,
                                 hash: blob_hash
                             }
                         )
-                    ); 
-            },            
-
-            // groth16 job is finished
-            er = groth16_futures.select_next_some() => {                
-                if let Err(failed) = er {
-                    warn!("Failed to run the groth16 job: `{:#?}`", failed);       
-                    //@ wtd with job?
-                    let job = jobs.get_mut(&failed.job_id).unwrap();
-                    job.status = job::Status::ExecutionFailed(failed.err_msg);
-                    continue;
-                }
-                let res = er.unwrap();
-                let job = jobs.get_mut(&res.job_id).unwrap();
-                job.status = job::Status::ExecutionSucceded;
-                info!("Groth16 extraction is finished for `{}`.", res.job_id);
-                let batch_id = if let job::Kind::Groth16(id) = job.kind {
-                    id
-                } else {
-                    warn!("Kind must be Groth16 but is `{:?}`", job.kind);
-                    continue
-                };
-                let blob_hash = xxh3_128(&res.blob);
-                // record to db                
-                db_insert_futures.push(
-                    col_proofs.insert_one(
-                        db::Proof {
-                            client_job_id: job.base_id.to_string(),
-                            job_id: job.id.clone(),
-                            kind: db::JobKind::Groth16,
-                            owner: job.owner.to_bytes(),
-                            input_blobs: job.input_blobs.values().cloned().collect(),
-                            blob: res.blob.clone(),       
-                            hash: blob_hash.to_string(),
-                        }
-                    )
-                    .into_future()
-                );
-
-                job.proof = Some(
-                    job::Proof {
-                        hash: blob_hash,
-                        blob: res.blob.clone() 
-                    }
-                );
-                
-                let _ = swarm
-                    .behaviour_mut()
-                    .req_resp
-                    .send_request(
-                        &job.owner,
-                        protocol::Request::ProofIsReady(
-                            ProofToken {
-                                job_id: job.base_id.clone(),
-                                kind: protocol::ProofKind::Groth16(batch_id, res.blob),
-                                hash: blob_hash,
-                            }
+                    );
+                // start a new prove
+                if let Some(j) = ready_jobs.pop_front() {
+                    prove_futures.push(
+                        r0::prove(
+                            j.id.clone(),
+                            j.input_blobs.values().cloned().collect(),
+                            j.kind.clone()
                         )
-                    );                
+                    );
+                    active_job = Some(j);
+                }
 
-            },            
+            },                        
 
             res = db_insert_futures.select_next_some() => {
                 match res {
