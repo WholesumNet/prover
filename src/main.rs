@@ -18,9 +18,13 @@ use std::{
         VecDeque
     },
     future::IntoFuture,
+    thread,
+    sync::mpsc
 };
 
-use tokio::time::interval;
+use tokio::time::{
+    self, interval
+};
 use tokio_stream::wrappers::IntervalStream;
 
 use env_logger::Env;
@@ -182,7 +186,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     .fuse();
     // it takes ~5s for a rtx 3090 to prove 2m cycles
     let mut timer_satisfy_job_prerequisities = IntervalStream::new(
-        interval(Duration::from_secs(5 * 60))
+        interval(Duration::from_secs(5))
     )
     .fuse();
     loop {
@@ -404,7 +408,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 // prove it
                                 if let Some(j) = ready_jobs.pop_front() {
                                     prove_futures.push(
-                                        r0::prove(
+                                        spawn_prove(
                                             j.input_blobs.values().cloned().collect(),
                                             j.kind.clone()
                                         )
@@ -533,7 +537,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 // prove it
                                 if let Some(j) = ready_jobs.pop_front() {
                                     prove_futures.push(
-                                        r0::prove(
+                                        spawn_prove(
                                             j.input_blobs.values().cloned().collect(),
                                             j.kind.clone()
                                         )
@@ -643,7 +647,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 // start a new prove
                 if let Some(j) = ready_jobs.pop_front() {
                     prove_futures.push(
-                        r0::prove(
+                        spawn_prove(
                             j.input_blobs.values().cloned().collect(),
                             j.kind.clone()
                         )
@@ -692,4 +696,24 @@ async fn mongodb_setup(
         .await?;
     info!("Successfully connected to the MongoDB instance!");
     Ok(client)
+}
+
+async fn spawn_prove(
+    input_blobs: Vec<Vec<u8>>,
+    kind: job::Kind
+) -> anyhow::Result<Vec<u8>>{
+    let (tx, rx) = mpsc::channel();   
+    let handle = thread::spawn(move || 
+        if let Err(e) = tx.send(r0::prove(input_blobs, kind)) {
+            warn!("Failed to share the prove result with the main thread: `{e:?}`");
+        }
+    );
+    loop {
+        if handle.is_finished() {
+            break 
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = handle.join();
+    rx.recv()?
 }

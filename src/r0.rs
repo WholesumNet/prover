@@ -65,7 +65,7 @@ fn join_proofs(
 // given a list of segment blobs, aggregate them into a final proof
 // input: n segments
 // output: 1 proof
-async fn aggregate_proofs(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
+fn aggregate_proofs(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
     info!(
         "Aggregating proofs, `{}` operations in total.",
         blobs.len() - 1
@@ -81,7 +81,7 @@ async fn aggregate_proofs(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
 // given a list of segment blobs, aggregate them into a final proof
 // input: n segments
 // output: 1 proof
-async fn aggregate_segments(
+fn aggregate_segments(
     blobs: Vec<Vec<u8>>
 ) -> anyhow::Result<Vec<u8>> {
     info!(
@@ -118,7 +118,7 @@ fn prove_zkr(
         .prove_zkr(zkr_req, AssetRequest::Inline)
 }
 
-async fn prove_assumption(
+fn prove_assumption(
     blob: Vec<u8>,
 ) -> anyhow::Result<Vec<u8>> {
     if let Ok(k) = bincode::deserialize::<KeccakRequestObject>(&blob) {
@@ -152,7 +152,7 @@ async fn prove_assumption(
     }
 }
 
-async fn to_groth16(
+fn to_groth16(
     blob: Vec<u8>
 ) -> anyhow::Result<Vec<u8>> {
     info!("Extracting Groth16 proof...");
@@ -174,27 +174,27 @@ async fn to_groth16(
     Ok(bincode::serialize(&groth16_proof)?)
 }
 
-pub async fn prove(
+pub fn prove(
     blobs: Vec<Vec<u8>>,
     kind: Kind
 ) -> anyhow::Result<Vec<u8>> {    
     match kind {
         Kind::Segment(_) => {
-            aggregate_segments(blobs).await
+            aggregate_segments(blobs)
         },
 
         Kind::Join(_) => {
-            aggregate_proofs(blobs).await
+            aggregate_proofs(blobs)
         },        
 
         Kind::Assumption(_) => {            
             let first = blobs.into_iter().next().unwrap();
-            prove_assumption(first).await
+            prove_assumption(first)
         },
 
         Kind::Groth16(_) => {
             let first = blobs.into_iter().next().unwrap();
-            to_groth16(first).await
+            to_groth16(first)
         }
     }
 }
