@@ -104,8 +104,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     let mut active_job = None;
     let mut ready_jobs = VecDeque::new();
     let mut pending_jobs = Vec::new();
-    // once generated, aggregated proofs are held here
-    let mut proof_blobs = HashMap::<u128, Vec<u8>>::new();
+    // a cache to hold generated proofs
+    let mut proofs_cache = HashMap::<u128, Vec<u8>>::new();
 
     // pull jobs to completion
     let mut prove_futures = FuturesUnordered::new();
@@ -462,7 +462,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             },
 
                                             InputBlob::Token(hash, owner) => {
-                                                if let Some(blob) = proof_blobs.get(&hash) {
+                                                if let Some(blob) = proofs_cache.get(&hash) {
                                                     input_blobs.insert(i, blob.clone());
                                                 } else {                                                        
                                                     prerequisites.insert(
@@ -621,7 +621,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         blob: proof_blob.clone()
                     }
                 );
-                proof_blobs.insert(hash, proof_blob);
+                //@ storage strategy or size limit is required, 1000 proofs occupy ~300mb of memory
+                proofs_cache.insert(hash, proof_blob);
+                if proofs_cache.len() > 1000 {
+                    warn!("There are more than 1000 proofs in the cache.");
+                }
 
                 let _req_id = swarm
                     .behaviour_mut()
