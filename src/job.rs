@@ -35,10 +35,7 @@ pub struct Token {
 #[derive(Debug, Clone)]
 pub struct Job {
     // job id as specified by the client
-    pub base_id: u128,
-
-    // job_id as we know it: base_id+item_id
-    pub id: String, 
+    pub id: u128,
 
     // pub working_dir: String,
     

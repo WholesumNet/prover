@@ -5,6 +5,7 @@ use futures::{
     stream::{
         FuturesUnordered,
         StreamExt,
+        TryStreamExt
     },
 };
 
@@ -338,21 +339,32 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 })) => {                
                     match request {
                         TransferBlob(hash) => {
-                            //@ check db
-                            if let Some(blob) = proof_blobs.get(&hash) {
-                                let _req_id = swarm
-                                    .behaviour_mut()
-                                    .req_resp
-                                    .send_response(
-                                        channel,
-                                        protocol::Response::BlobIsReady(
-                                            blob.clone()
-                                        )
-                                    );
-                                info!("Requested blob `{hash}` is found and sent back.");
-                            } else {
-                                warn!("Requested blob `{hash}` is not found.");
-                            }
+                            match col_proofs.find(
+                                doc! {
+                                    "hash": hash.to_string()
+                                }
+                            ).await {
+                                Ok(mut cursor) => {
+                                    if let Some(proof) = cursor.try_next().await? {
+                                        let _req_id = swarm
+                                            .behaviour_mut()
+                                            .req_resp
+                                            .send_response(
+                                                channel,
+                                                protocol::Response::BlobIsReady(
+                                                    proof.blob
+                                                )
+                                            );
+                                        info!("Requested blob `{hash}` is found and sent back.");
+                                    } else {
+                                        warn!("Requested blob `{hash}` is not found.");
+                                    }
+                                },
+
+                                Err(e) => {
+                                    warn!("DB lookup error for blob `{hash}`: `{e:?}`.");
+                                }
+                            };
                         },
 
                         _ => {
@@ -380,8 +392,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 let index = job.pending_blobs.remove(&hash).unwrap();
                                 let _ = job.prerequisites.remove(&index);
                                 job.input_blobs.insert(index, blob.clone());
-                                proof_blobs.insert(hash, blob.clone());
-                                info!("Received blob `{hash}` from `{client_peer_id}`");
+                                //@ should be saved to db?
+                                info!("Received requested blob `{hash}` from `{client_peer_id}`");
                                 if job.prerequisites.is_empty() {
                                     info!("Job {} is ready to run.", job.id);
                                     ready_jobs.push_back(job.clone());
@@ -422,8 +434,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         }
                                     };                                    
                                     ready_jobs.push_back(Job {
-                                        base_id: compute_job.id,
-                                        id: format!("{}-{}", compute_job.id, batch_id),
+                                        id: compute_job.id,
                                         owner: client_peer_id,
                                         kind: job::Kind::Assumption(batch_id),
                                         input_blobs: BTreeMap::from([
@@ -468,8 +479,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     }
                                     let ready_for_proving = prerequisites.is_empty();
                                     let job = Job {
-                                        base_id: compute_job.id,
-                                        id: format!("{}-{}", compute_job.id, agg_details.id),
+                                        id: compute_job.id,
                                         owner: client_peer_id,
                                         kind: if agg_details.blobs_are_segment { 
                                             job::Kind::Segment(agg_details.id)
@@ -507,8 +517,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     };
                                     // keep track of running jobs                
                                     ready_jobs.push_back(Job {
-                                        base_id: compute_job.id,
-                                        id: format!("{}-{}", compute_job.id, batch_id),
+                                        id: compute_job.id,
                                         owner: client_peer_id,
                                         kind: job::Kind::Groth16(batch_id),
                                         input_blobs: BTreeMap::from([
@@ -541,58 +550,78 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 },
             },
 
-            er = prove_futures.select_next_some() => {
-                if let Err(e) = er {
+            res = prove_futures.select_next_some() => {
+                if let Err(e) = res {
                     let job = active_job.take().unwrap();                    
                     warn!("Failed to prove job `{}`: `{:?}`", job.id, e);
                     continue
                 }
-                let proof_blob = er.unwrap();
+                let proof_blob = res.unwrap();
                 let mut job = active_job.take().unwrap();
-                let (batch_id, proof_kind) = match job.kind {
+                let (_batch_id, proof_kind, db_prove_kind) = match job.kind {
                     job::Kind::Segment(bid) => {
-                        info!("Segment aggregate `{}` is proved", job.id);
-                        (bid, ProofKind::Aggregate(bid))
+                        info!("Segment aggregate `{}` is proved for `{}`", bid, job.id);
+                        (
+                            bid,
+                            ProofKind::Aggregate(bid),
+                            db::ProveKind::Segment(bid.to_string())
+                        )
                     },
 
                     job::Kind::Join(bid) => {
-                        info!("Join aggregate `{}` is proved.", job.id);
-                        (bid, ProofKind::Aggregate(bid))
+                        info!("Join aggregate `{}` is proved for `{}`", bid, job.id);
+                        (
+                            bid,
+                            ProofKind::Aggregate(bid),
+                            db::ProveKind::Join(bid.to_string())
+                        )
                     },
 
                     job::Kind::Assumption(bid) => {
-                        info!("Assumption `{}` is proved.`", job.id);
-                        (bid, ProofKind::Assumption(bid, proof_blob.clone()))
+                        info!("Assumption `{}` is proved for `{}`", bid, job.id);
+                        (
+                            bid,
+                            ProofKind::Assumption(bid, proof_blob.clone()),
+                            db::ProveKind::Assumption(bid.to_string())
+                        )
                     },
 
                     job::Kind::Groth16(bid) => {
-                        info!("Groth16 extraction `{}` is finished.", job.id);
-                        (bid, ProofKind::Groth16(bid, proof_blob.clone()))
+                        info!("Groth16 extraction `{}` is finished for `{}`", bid, job.id);
+                        (
+                            bid,
+                            ProofKind::Groth16(bid, proof_blob.clone()),
+                            db::ProveKind::Assumption(bid.to_string())
+                        )
                     },
                 };
-                let blob_hash = xxh3_128(&proof_blob);
-                // record to db                
+                let hash = xxh3_128(&proof_blob);
+                // record to db
+                let input_hashes = job
+                    .input_blobs
+                    .values()
+                    .map(|b| xxh3_128(b).to_string())
+                    .collect();
                 db_insert_futures.push(
                     col_proofs.insert_one(
                         db::Proof {
-                            client_job_id: job.base_id.to_string(),
-                            job_id: job.id.clone(),
-                            kind: db::JobKind::Segment(batch_id.to_string()),
+                            job_id: job.id.to_string(),
+                            kind: db_prove_kind,
+                            input_hashes: input_hashes,
                             owner: job.owner.to_bytes(),
-                            input_blobs: job.input_blobs.values().cloned().collect(),
                             blob: proof_blob.clone(),    
-                            hash: blob_hash.to_string(),                
+                            hash: hash.to_string(),                
                         }
                     )
                     .into_future()
                 );
                 job.proof = Some(
                     job::Proof {
-                        hash: blob_hash,
+                        hash: hash,
                         blob: proof_blob.clone()
                     }
                 );
-                proof_blobs.insert(blob_hash, proof_blob);
+                proof_blobs.insert(hash, proof_blob);
 
                 let _req_id = swarm
                     .behaviour_mut()
@@ -601,9 +630,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         &job.owner,
                         protocol::Request::ProofIsReady(
                             ProofToken {
-                                job_id: job.base_id.clone(),
+                                job_id: job.id,
                                 kind: proof_kind,
-                                hash: blob_hash
+                                hash: hash
                             }
                         )
                     );
@@ -648,12 +677,8 @@ async fn mongodb_setup(
     uri: &str,
 ) -> anyhow::Result<mongodb::Client> {
     info!("Connecting to the MongoDB daemon...");
-    let mut client_options = ClientOptions::parse(
-        uri
-    ).await?;
-    let server_api = ServerApi::builder().version(
-        ServerApiVersion::V1
-    ).build();
+    let mut client_options = ClientOptions::parse(uri).await?;
+    let server_api = ServerApi::builder().version(ServerApiVersion::V1).build();
     client_options.server_api = Some(server_api);
     let client = mongodb::Client::with_options(client_options)?;
     // Send a ping to confirm a successful connection
@@ -664,41 +689,3 @@ async fn mongodb_setup(
     info!("Successfully connected to the MongoDB instance!");
     Ok(client)
 }
-
-// #[derive(Debug, Clone)]
-// struct DBInsertResult {
-//     job_id: String,
-
-//     inserted_id: Bson,    
-// }
-
-// #[derive(Debug, Clone)]
-// struct DBInsertError {
-//     job_id: String,
-
-//     err_msg: String,    
-// }
-
-// async fn insert_into_db(
-//     col_proofs: &mongodb::Collection<db::Proof>,
-//     db_proof: db::Proof
-// ) -> anyhow::Result<DBInsertResult, DBInsertError> {
-//     let job_id = db_proof.job_id.clone();
-//     col_proofs
-//     .insert_one(db_proof)
-//     .await
-//     .and_then(|insert_result| 
-//         Ok(
-//             DBInsertResult {
-//                 job_id: job_id.clone(),
-//                 inserted_id: insert_result.inserted_id
-//             }
-//         )
-//     )
-//     .map_err(|e|
-//         DBInsertError {        
-//             job_id: job_id,
-//             err_msg: e.to_string()
-//         }
-//     )
-// }
