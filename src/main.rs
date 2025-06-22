@@ -693,15 +693,17 @@ async fn lookup_proof(
     col_proofs: &mongodb::Collection<db::Proof>,
     hash: u128
 ) -> anyhow::Result<Vec<u8>> {
-    let blob = col_proofs.find(
+    if let Some(proof) = col_proofs.find(
         doc! {
             "hash": hash.to_string()
         }
     )
     .await?
-    .try_next().await?
-    .unwrap()
-    .blob;
-
-    Ok(blob)
+    .try_next()
+    .await?
+    {
+        Ok(proof.blob)
+    } else {
+        Err(anyhow::Error::msg("Blob not found."))
+    }    
 }
