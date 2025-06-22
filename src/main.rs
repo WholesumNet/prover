@@ -306,6 +306,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         },
 
                     };
+                    if !ready_jobs.is_empty() {
+                        continue;
+                    }
                     info!("Gossip: need `{need:?}`");
                     match need {
                         NeedKind::Prove(_num_jobs) => {
