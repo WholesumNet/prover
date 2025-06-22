@@ -16,14 +16,6 @@ pub enum Kind {
     Groth16(u128),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Proof {
-    // xxh3_128
-    pub hash: u128,
-
-    pub blob: Vec<u8>
-}
-
 #[derive(Debug, Clone)]
 pub struct Token {
     // xxh3_128
@@ -50,8 +42,6 @@ pub struct Job {
     // <index, token>
     pub prerequisites: BTreeMap<usize, Token>,
     // inverse helper map to put received blobs
-    pub pending_blobs: HashMap<u128, usize>,
+    pub pending_blobs: HashMap<u128, usize>
 
-    // result of the job
-    pub proof: Option<Proof>
 }

@@ -108,8 +108,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     let mut active_job = None;
     let mut ready_jobs = VecDeque::new();
     let mut pending_jobs = Vec::new();
-    // a cache to hold generated proofs
-    let mut proofs_cache = HashMap::<u128, Vec<u8>>::new();
 
     // pull jobs to completion
     let mut prove_futures = FuturesUnordered::new();
@@ -343,37 +341,23 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 })) => {                
                     match request {
                         TransferBlob(hash) => {
-                            match col_proofs.find(
-                                doc! {
-                                    "hash": hash.to_string()
-                                }
-                            ).await {
-                                Ok(mut cursor) => {
-                                    if let Some(proof) = cursor.try_next().await? {
-                                        let _req_id = swarm
-                                            .behaviour_mut()
-                                            .req_resp
-                                            .send_response(
-                                                channel,
-                                                protocol::Response::BlobIsReady(
-                                                    proof.blob
-                                                )
-                                            );
-                                        info!("Requested blob `{hash}` is found and sent back.");
-                                    } else {
-                                        warn!("Requested blob `{hash}` is not found.");
-                                    }
-                                },
-
-                                Err(e) => {
-                                    warn!("DB lookup error for blob `{hash}`: `{e:?}`.");
-                                }
-                            };
+                            if let Ok(blob) = lookup_proof(&col_proofs, hash).await {
+                                let _req_id = swarm
+                                    .behaviour_mut()
+                                    .req_resp
+                                    .send_response(
+                                        channel,
+                                        protocol::Response::BlobIsReady(blob)
+                                    );
+                                info!("Requested blob `{hash}` is found and sent back.");                                    
+                            } else {
+                                warn!("Requested blob `{hash}` is not available.");
+                            }
                         },
 
                         _ => {
                             continue
-                        }
+                        }                        
                     };
                 },
 
@@ -446,7 +430,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         ]),
                                         prerequisites: BTreeMap::new(),
                                         pending_blobs: HashMap::new(),
-                                        proof: None,
                                     });
                                 },                                
 
@@ -466,7 +449,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             },
 
                                             InputBlob::Token(hash, owner) => {
-                                                if let Some(blob) = proofs_cache.get(&hash) {
+                                                if let Ok(blob) = lookup_proof(&col_proofs, hash).await {
                                                     input_blobs.insert(i, blob.clone());
                                                 } else {                                                        
                                                     prerequisites.insert(
@@ -493,7 +476,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         input_blobs: input_blobs,
                                         prerequisites: prerequisites,
                                         pending_blobs: pending_blobs,
-                                        proof: None
                                     };
                                     if ready_for_proving {
                                         ready_jobs.push_back(job);                                        
@@ -528,8 +510,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             (0, blob)
                                         ]),
                                         prerequisites: BTreeMap::new(),
-                                        pending_blobs: HashMap::new(),
-                                        proof: None,
+                                        pending_blobs: HashMap::new()
                                     });
                                 }
                             };
@@ -561,7 +542,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     continue
                 }
                 let proof_blob = res.unwrap();
-                let mut job = active_job.take().unwrap();
+                let job = active_job.take().unwrap();
                 let (_batch_id, proof_kind, db_prove_kind) = match job.kind {
                     job::Kind::Segment(bid) => {
                         info!("Segment aggregate `{}` is proved for `{}`", bid, job.id);
@@ -619,17 +600,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     )
                     .into_future()
                 );
-                job.proof = Some(
-                    job::Proof {
-                        hash: hash,
-                        blob: proof_blob.clone()
-                    }
-                );
-                //@ storage strategy or size limit is required, 1000 proofs occupy ~300mb of memory
-                proofs_cache.insert(hash, proof_blob);
-                if proofs_cache.len() > 1000 {
-                    warn!("There are more than 1000 proofs in the cache.");
-                }
 
                 let _req_id = swarm
                     .behaviour_mut()
@@ -716,4 +686,22 @@ async fn spawn_prove(
     }
     let _ = handle.join();
     rx.recv()?
+}
+
+// look up proof in the db
+async fn lookup_proof(
+    col_proofs: &mongodb::Collection<db::Proof>,
+    hash: u128
+) -> anyhow::Result<Vec<u8>> {
+    let blob = col_proofs.find(
+        doc! {
+            "hash": hash.to_string()
+        }
+    )
+    .await?
+    .try_next().await?
+    .unwrap()
+    .blob;
+
+    Ok(blob)
 }
