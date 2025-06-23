@@ -20,11 +20,15 @@ To install Risc0, please follow the following [guide](https://github.com/risc0/r
 
 Docker runtime is needed as it is used to run `Risc0` containers. This awesome [guide](https://www.digitalocean.com/community/tutorials/how-to-install-and-use-docker-on-ubuntu-20-04) from DigitalOcean is helpful in this regard.
 
+#### MongoDB
+
+Install the MongoDB from [here](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-community-with-docker/). Make sure a Docker container runs and is listenning on `localhost:27017`. 
+
 ### Library dependencies
 
-To run a prover node, you would first need to fork the following libraries and put them in the parent("..") directory of the project:
+To run, download the the following libraries and put them in the parent("..") directory:
 
-- [comms](https://github.com/WholesumNet/comms)
+- [peyk](https://github.com/WholesumNet/peyk)
 
 ### USAGE
 
