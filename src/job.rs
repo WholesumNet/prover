@@ -3,66 +3,36 @@ use std::collections::{
 };
 use libp2p::PeerId;
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Status {
-    WaitingForBlobs,
-
-    Running,
-    
-    ExecutionSucceded,
-    
-    // param: error message
-    ExecutionFailed(String),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum Kind {
-    // param: claim digest
-    Keccak([u8; 32]),
-
-    // param: claim digest
-    Zkr([u8; 32]),
-
-    // param: batch id
-    Segment(u32),
-
-    // param: batch id
-    Join(u32),
-
-    Groth16,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Proof {
-    // xxh3_128
-    pub hash: u128,
+pub enum Kind {
+    // param: batch id
 
-    pub blob: Vec<u8>
+    Segment(u128),
+
+    Join(u128),
+
+    Assumption(u128),
+
+    Groth16(u128),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Token {
     // xxh3_128
     pub hash: u128,
 
-    pub owners: Vec<String>
+    pub owner: Vec<u8>
 }
 
-// maintain lifecycle of a job
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Job {
     // job id as specified by the client
-    pub base_id: String,
-
-    // job_id as we know it: base_id+item_id
-    pub id: String, 
+    pub id: u128,
 
     // pub working_dir: String,
     
     // the client
     pub owner: PeerId,
-
-    pub status: Status,
 
     pub kind: Kind,
 
@@ -72,9 +42,6 @@ pub struct Job {
     // <index, token>
     pub prerequisites: BTreeMap<usize, Token>,
     // inverse helper map to put received blobs
-    pub pending_blobs: HashMap<u128, usize>,
+    pub pending_blobs: HashMap<u128, usize>
 
-    // result of the job
-    pub proof: Option<Proof>
 }
-

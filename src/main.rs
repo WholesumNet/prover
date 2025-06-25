@@ -5,6 +5,7 @@ use futures::{
     stream::{
         FuturesUnordered,
         StreamExt,
+        TryStreamExt
     },
 };
 
@@ -13,12 +14,17 @@ use std::{
     time::Duration,
     collections::{
         HashMap,
-        BTreeMap
+        BTreeMap,
+        VecDeque
     },
     future::IntoFuture,
+    thread,
+    sync::mpsc
 };
 
-use tokio::time::interval;
+use tokio::time::{
+    self, interval
+};
 use tokio_stream::wrappers::IntervalStream;
 
 use env_logger::Env;
@@ -53,8 +59,9 @@ use peyk::{
     protocol,
     protocol::{
         NeedKind,
-        ProofToken,
         InputBlob,
+        ProofToken,
+        ProofKind
     },
     protocol::Request::{
         WouldProve,
@@ -63,6 +70,7 @@ use peyk::{
 };
 
 mod job;
+use job::Job;
 mod r0;
 mod db;
 
@@ -96,14 +104,13 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     // setup mongodb
     let db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
-    // let's maintain a list of jobs
-    let mut jobs = HashMap::<String, job::Job>::new();
-    
+    // maintain jobs
+    let mut active_job = None;
+    let mut ready_jobs = VecDeque::new();
+    let mut pending_jobs = Vec::new();
+
     // pull jobs to completion
-    let mut keccak_futures = FuturesUnordered::new();
-    let mut zkr_futures = FuturesUnordered::new();
-    let mut aggregate_futures = FuturesUnordered::new();
-    let mut groth16_futures = FuturesUnordered::new();
+    let mut prove_futures = FuturesUnordered::new();
 
     let col_proofs = db_client
         .database("wholesum_prover")
@@ -122,7 +129,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             let new_key = identity::Keypair::generate_ed25519();
             let bytes = new_key.to_protobuf_encoding().unwrap();
             let _bw = std::fs::write("./key.secret", bytes);
-            warn!("No keys were supplied, so one has been generated for you and saved to `{}` file.", "./key.secret");
+            warn!("No keys were supplied, so one is generated for you and saved to `./key.secret` file.");
             new_key
         }
     };    
@@ -131,11 +138,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     // Libp2p swarm 
     let mut swarm = peyk::p2p::setup_swarm(&local_key).await?;
     let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
-    let _ = 
-        swarm
-            .behaviour_mut()
-            .gossipsub
-            .subscribe(&topic);
+    let _ = swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&topic);
 
     // bootstrap 
     if false == cli.dev {
@@ -176,9 +182,9 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
         interval(Duration::from_secs(5 * 60))
     )
     .fuse();
-    // ~5 secs is the time it takes for a rtx 3090 to prove 2m cycles
+    // it takes ~5s for a rtx 3090 to prove 2m cycles
     let mut timer_satisfy_job_prerequisities = IntervalStream::new(
-        interval(Duration::from_secs(5 * 60))
+        interval(Duration::from_secs(5))
     )
     .fuse();
     loop {
@@ -197,37 +203,33 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             },
 
             _i = timer_satisfy_job_prerequisities.select_next_some() => {
-                jobs.values()
-                    .filter(|j| j.status == job::Status::WaitingForBlobs)
-                    .for_each(|j| {
+                pending_jobs
+                    .iter()                    
+                    .for_each(|j: &Job| {
                         j.prerequisites.values()
                             .for_each(|token| {
-                                token.owners
-                                    .iter()
-                                    .for_each(|owner| {
-                                        //@ move peer_id from string calculation to when job is being created
-                                        let peer_id = match PeerId::from_bytes(owner.as_bytes()) {
-                                            Ok(p) => p,
+                                //@ move peer_id from string calculation to when job is being created
+                                let peer_id = match PeerId::from_bytes(&token.owner) {
+                                    Ok(p) => p,
 
-                                            Err(e) => {
-                                                warn!("PeerId is invalid: {owner}: {e:?}");
-                                                return
-                                            }
-                                        };
-                                        let _req_id = swarm
-                                            .behaviour_mut()
-                                            .req_resp
-                                            .send_request(
-                                                &peer_id,
-                                                TransferBlob(token.hash)
-                                            );
-                                        info!(
-                                            "Requested transfer of blob `{}` from `{}`",
-                                            token.hash,
-                                            owner
-                                        );
-                                    });
-                            })
+                                    Err(e) => {
+                                        warn!("PeerId is invalid: {e:?}");
+                                        return
+                                    }
+                                };
+                                let _req_id = swarm
+                                    .behaviour_mut()
+                                    .req_resp
+                                    .send_request(
+                                        &peer_id,
+                                        TransferBlob(token.hash)
+                                    );
+                                info!(
+                                    "Requested transfer of blob `{}` from `{}`",
+                                    token.hash,
+                                    peer_id
+                                );
+                            });
                     });
             }
 
@@ -304,7 +306,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         },
 
                     };
-                    info!("Received `{need:#?}` need...");
+                    if !ready_jobs.is_empty() {
+                        continue;
+                    }
+                    info!("Gossip: need `{need:?}`");
                     match need {
                         NeedKind::Prove(_num_jobs) => {
                             let _req_id = swarm
@@ -339,27 +344,23 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 })) => {                
                     match request {
                         TransferBlob(hash) => {
-                            //@ check db
-                            if let Some(job) = jobs.values()
-                                .filter(|j| j.status == job::Status::ExecutionSucceded)
-                                .find(|j| j.proof.as_ref().unwrap().hash == hash)
-                            {
+                            if let Ok(blob) = lookup_proof(&col_proofs, hash).await {
                                 let _req_id = swarm
                                     .behaviour_mut()
                                     .req_resp
                                     .send_response(
                                         channel,
-                                        protocol::Response::BlobIsReady(
-                                            job.proof.as_ref().unwrap().blob.clone()
-                                        )
+                                        protocol::Response::BlobIsReady(blob)
                                     );
-                                info!("Requested proof `{hash}` is found and sent back.");
+                                info!("Requested blob `{hash}` is found and sent back.");                                    
+                            } else {
+                                warn!("Requested blob `{hash}` is not available.");
                             }
                         },
 
                         _ => {
                             continue
-                        }
+                        }                        
                     };
                 },
 
@@ -375,110 +376,71 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     match response {
                         protocol::Response::BlobIsReady(blob) => {
                             let hash = xxh3_128(&blob);
-                            if let Some(job) = jobs.values_mut()
-                                .filter(|j| j.status == job::Status::WaitingForBlobs)
-                                .find(|j| j.pending_blobs.contains_key(&hash))
-                            {
+                            pending_jobs.retain_mut(|job| { 
+                                if !job.pending_blobs.contains_key(&hash) {
+                                    return true
+                                }
                                 let index = job.pending_blobs.remove(&hash).unwrap();
                                 let _ = job.prerequisites.remove(&index);
-                                job.input_blobs.insert(index, blob);
-                                info!(
-                                    "Received blob `{}` from `{:?}`",
-                                    hash,
-                                    client_peer_id
-                                );
+                                job.input_blobs.insert(index, blob.clone());
+                                //@ should be saved to db?
+                                info!("Received requested blob `{hash}` from `{client_peer_id}`");
                                 if job.prerequisites.is_empty() {
                                     info!("Job {} is ready to run.", job.id);
-                                    let input_blobs = job.input_blobs.values().cloned().collect();
-                                    job.status = job::Status::Running;
-                                    let blobs_are_segment = if let job::Kind::Segment(_) = job.kind {
-                                        true
-                                    } else if let job::Kind::Join(_) = job.kind {
-                                        false
-                                    } else {
-                                        warn!("Invlid job kind for aggregate: `{:?}`", job.kind);
-                                        continue
-                                    };
-                                    aggregate_futures.push(
-                                        r0::aggregate(job.id.clone(), input_blobs, blobs_are_segment)
-                                    );                                    
+                                    ready_jobs.push_back(job.clone());
+                                }
+                                !job.prerequisites.is_empty()
+                            });
+                            if active_job.is_none() {
+                                // prove it
+                                if let Some(j) = ready_jobs.pop_front() {
+                                    prove_futures.push(
+                                        spawn_prove(
+                                            j.input_blobs.values().cloned().collect(),
+                                            j.kind.clone()
+                                        )
+                                    );
+                                    active_job = Some(j);
                                 }
                             }
                         },
 
                         protocol::Response::Job(compute_job) => {                            
                             match compute_job.kind {
-                                protocol::JobKind::Keccak(keccak_details) => {
-                                    let prove_id = format!(
-                                        "{}-{:?}",
-                                        compute_job.id,
-                                        keccak_details.claim_digest
+                                protocol::JobKind::Assumption(assumption_details) => {
+                                    info!(
+                                        "Received assumption job from peer `{}`",
+                                        client_peer_id
                                     );
-                                    // keep track of running jobs                
-                                    jobs.insert(                    
-                                        prove_id.clone(),
-                                        job::Job {
-                                            base_id: compute_job.id,
-                                            id: prove_id.clone(),
-                                            owner: client_peer_id,
-                                            status: job::Status::Running,
-                                            kind: job::Kind::Keccak(keccak_details.claim_digest.clone()),
-                                            input_blobs: BTreeMap::from([
-                                                (0, keccak_details.blob.clone())
-                                            ]),
-                                            prerequisites: BTreeMap::new(),
-                                            pending_blobs: HashMap::new(),
-                                            proof: None,
-                                        },
-                                    );
-                                    // run it
-                                    //@ use reference of blobs instead
-                                    keccak_futures.push(
-                                        r0::prove_keccak(
-                                            prove_id,
-                                            keccak_details.blob.clone() 
-                                        )
-                                    );
-                                },
-
-                                protocol::JobKind::Zkr(zkr_details) => {
-                                    let prove_id = format!(
-                                        "{}-{:?}",
-                                        compute_job.id,
-                                        zkr_details.claim_digest
-                                    );
-                                    // keep track of running jobs                
-                                    jobs.insert(                    
-                                        prove_id.clone(),
-                                        job::Job {
-                                            base_id: compute_job.id,
-                                            id: prove_id.clone(),
-                                            owner: client_peer_id,
-                                            status: job::Status::Running,
-                                            kind: job::Kind::Zkr(zkr_details.claim_digest.clone()),
-                                            input_blobs: BTreeMap::from([
-                                                (0, zkr_details.blob.clone())
-                                            ]),
-                                            prerequisites: BTreeMap::new(),
-                                            pending_blobs: HashMap::new(),
-                                            proof: None,
-                                        },
-                                    );
-                                    // run it
-                                    //@ use reference of blobs instead
-                                    zkr_futures.push(
-                                        r0::prove_zkr(
-                                            prove_id,
-                                            zkr_details.blob.clone() 
-                                        )
-                                    );
-                                }
+                                    let (batch_id, blob) = {
+                                        let ib = &assumption_details.batch[0];
+                                        if let protocol::InputBlob::Blob(b) = &ib.1 {
+                                            (ib.0, b.clone())
+                                        } else {
+                                            warn!(
+                                                "Input blob should be of blob kind but is: `{:?}`",
+                                                ib.1                                                
+                                            );
+                                            continue
+                                        }
+                                    };                                    
+                                    ready_jobs.push_back(Job {
+                                        id: compute_job.id,
+                                        owner: client_peer_id,
+                                        kind: job::Kind::Assumption(batch_id),
+                                        input_blobs: BTreeMap::from([
+                                            (0, blob)
+                                        ]),
+                                        prerequisites: BTreeMap::new(),
+                                        pending_blobs: HashMap::new(),
+                                    });
+                                },                                
 
                                 protocol::JobKind::Aggregate(agg_details) => {
-                                    let prove_id = format!(
-                                        "{}-{}",
-                                        compute_job.id,
-                                        agg_details.id
+                                    info!(
+                                        "Received aggregate job `{}` from peer `{}`",
+                                        agg_details.id,
+                                        client_peer_id
                                     );
                                     let mut input_blobs = BTreeMap::new();
                                     let mut prerequisites = BTreeMap::new();
@@ -489,81 +451,83 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                 input_blobs.insert(i, b);
                                             },
 
-                                            InputBlob::Token(hash, owners) => {
-                                                prerequisites.insert(
-                                                    i, 
-                                                    job::Token {
-                                                        hash: hash,
-                                                        owners: owners
-                                                    }
-                                                );
-                                                pending_blobs.insert(hash, agg_details.id as usize);
+                                            InputBlob::Token(hash, owner) => {
+                                                if let Ok(blob) = lookup_proof(&col_proofs, hash).await {
+                                                    input_blobs.insert(i, blob.clone());
+                                                } else {                                                        
+                                                    prerequisites.insert(
+                                                        i, 
+                                                        job::Token {
+                                                            hash: hash,
+                                                            owner: owner
+                                                        }
+                                                    );
+                                                    pending_blobs.insert(hash, agg_details.id as usize);
+                                                }
                                             }
                                         };
                                     }
                                     let ready_for_proving = prerequisites.is_empty();
+                                    let job = Job {
+                                        id: compute_job.id,
+                                        owner: client_peer_id,
+                                        kind: if agg_details.blobs_are_segment { 
+                                            job::Kind::Segment(agg_details.id)
+                                        } else {
+                                            job::Kind::Join(agg_details.id)
+                                        },
+                                        input_blobs: input_blobs,
+                                        prerequisites: prerequisites,
+                                        pending_blobs: pending_blobs,
+                                    };
                                     if ready_for_proving {
-                                        let cloned_blobs = input_blobs.values().cloned().collect();                                        
-                                        aggregate_futures.push(
-                                            r0::aggregate(
-                                                prove_id.clone(),
-                                                cloned_blobs,
-                                                agg_details.blobs_are_segment
-                                            )
-                                        );
-                                    }
-                                    jobs.insert(
-                                        prove_id.clone(),
-                                        job::Job {
-                                            base_id: compute_job.id,
-                                            id: prove_id,
-                                            owner: client_peer_id,
-                                            status: if ready_for_proving {
-                                                job::Status::Running
-                                            } else {
-                                                job::Status::WaitingForBlobs
-                                            },
-                                            kind: if agg_details.blobs_are_segment { 
-                                                job::Kind::Segment(agg_details.id)
-                                            } else {
-                                                job::Kind::Join(agg_details.id)
-                                            },
-                                            input_blobs: input_blobs,
-                                            prerequisites: prerequisites,
-                                            pending_blobs: pending_blobs,
-                                            proof: None,
-                                        }
-                                    );
+                                        ready_jobs.push_back(job);                                        
+                                    } else {                                        
+                                        pending_jobs.push(job);
+                                    }                                    
                                 },
                                 
                                 protocol::JobKind::Groth16(groth16_details) => {
-                                    let groth16_id = format!("{}-g16",compute_job.id);
+                                    info!(
+                                        "Received Groth16 job from peer `{}`",
+                                        client_peer_id
+                                    );                                    
+                                    let (batch_id, blob) = {
+                                        let ib = &groth16_details.batch[0];
+                                        if let protocol::InputBlob::Blob(b) = &ib.1 {
+                                            (ib.0, b.clone())
+                                        } else {
+                                            warn!(
+                                                "Input blob should be of blob kind but is: `{:?}`",
+                                                ib.1                                                
+                                            );
+                                            continue
+                                        }
+                                    };
                                     // keep track of running jobs                
-                                    jobs.insert(                    
-                                        groth16_id.clone(),
-                                        job::Job {
-                                            base_id: compute_job.id.clone(),
-                                            id: groth16_id.clone(),
-                                            owner: client_peer_id,
-                                            status: job::Status::Running,
-                                            kind: job::Kind::Groth16,
-                                            input_blobs: BTreeMap::from([
-                                                (0, groth16_details.blob.clone())
-                                            ]),
-                                            prerequisites: BTreeMap::new(),
-                                            pending_blobs: HashMap::new(),
-                                            proof: None,
-                                        },
-                                    );
-                                    // run it
-                                    //@ use reference of blobs instead
-                                    groth16_futures.push(
-                                        r0::to_groth16(
-                                            groth16_id,
-                                            groth16_details.blob.clone(),
+                                    ready_jobs.push_back(Job {
+                                        id: compute_job.id,
+                                        owner: client_peer_id,
+                                        kind: job::Kind::Groth16(batch_id),
+                                        input_blobs: BTreeMap::from([
+                                            (0, blob)
+                                        ]),
+                                        prerequisites: BTreeMap::new(),
+                                        pending_blobs: HashMap::new()
+                                    });
+                                }
+                            };
+                            if active_job.is_none() {
+                                // prove it
+                                if let Some(j) = ready_jobs.pop_front() {
+                                    prove_futures.push(
+                                        spawn_prove(
+                                            j.input_blobs.values().cloned().collect(),
+                                            j.kind.clone()
                                         )
                                     );
-                                },
+                                    active_job = Some(j);
+                                }
                             }
                         }
                     }
@@ -574,239 +538,97 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 },
             },
 
-            // keccak is proved
-            er = keccak_futures.select_next_some() => {
-                if let Err(failed) = er {
-                    warn!("Failed to run prove keccak job: `{:#?}`", failed);       
-                    //@ wtd with job?
-                    let job = jobs.get_mut(&failed.job_id).unwrap();
-                    job.status = job::Status::ExecutionFailed(failed.err_msg);
-                    continue;
+            res = prove_futures.select_next_some() => {
+                if let Err(e) = res {
+                    let job = active_job.take().unwrap();                    
+                    warn!("Failed to prove job `{}`: `{:?}`", job.id, e);
+                    continue
                 }
-                let res = er.unwrap();
-                let job = jobs.get_mut(&res.job_id).unwrap();
-                job.status = job::Status::ExecutionSucceded;
-                info!("Prove keccak is finished for `{}`", res.job_id);
-                let claim_digest = if let job::Kind::Keccak(claim_digest) = job.kind { 
-                    claim_digest
-                } else {
-                    warn!("No claim digest is available for `{:?}`.", job.kind);
-                    [0u8; 32]
-                };
-                let blob_hash = xxh3_128(&res.blob);
-                // record to db                
-                db_insert_futures.push(
-                    col_proofs.insert_one(
-                        db::Proof {
-                            client_job_id: job.base_id.clone(),
-                            job_id: job.id.clone(),
-                            kind: db::JobKind::Keccak(claim_digest),
-                            owner: job.owner.to_string(),
-                            input_blobs: job.input_blobs.values().cloned().collect(),
-                            blob: res.blob.clone(),    
-                            hash: blob_hash,                
-                        }
-                    )
-                    .into_future()
-                );
-                job.proof = Some(
-                    job::Proof {
-                        hash: blob_hash,
-                        blob: res.blob.clone()
-                    }
-                );
-
-                let _ = swarm
-                    .behaviour_mut()
-                    .req_resp
-                    .send_request(
-                        &job.owner,
-                        protocol::Request::ProofIsReady(
-                            protocol::ProofToken {
-                                job_id: job.base_id.clone(),
-                                kind: protocol::ProofKind::Assumption(
-                                    claim_digest,
-                                    res.blob
-                                ),
-                                hash: blob_hash
-                            }
+                let proof_blob = res.unwrap();
+                let job = active_job.take().unwrap();
+                let (_batch_id, proof_kind, db_prove_kind) = match job.kind {
+                    job::Kind::Segment(bid) => {
+                        info!("Segment aggregate `{}` is proved for `{}`", bid, job.id);
+                        (
+                            bid,
+                            ProofKind::Aggregate(bid),
+                            db::ProveKind::Segment(bid.to_string())
                         )
-                    ); 
-            },
+                    },
 
-            // zkr is proved
-            er = zkr_futures.select_next_some() => {
-                if let Err(failed) = er {
-                    warn!("Failed to run prove zkr job: `{:#?}`", failed);       
-                    //@ wtd with job?
-                    let job = jobs.get_mut(&failed.job_id).unwrap();
-                    job.status = job::Status::ExecutionFailed(failed.err_msg);
-                    continue;
-                }
-                let res = er.unwrap();
-                let job = jobs.get_mut(&res.job_id).unwrap();
-                job.status = job::Status::ExecutionSucceded;
-                info!("Prove zkr is finished for `{}`", res.job_id);
-                let claim_digest = if let job::Kind::Zkr(claim_digest) = job.kind { 
-                    claim_digest
-                } else {
-                    warn!("No claim digest is available for `{:?}`.", job.kind);
-                    [0u8; 32]
+                    job::Kind::Join(bid) => {
+                        info!("Join aggregate `{}` is proved for `{}`", bid, job.id);
+                        (
+                            bid,
+                            ProofKind::Aggregate(bid),
+                            db::ProveKind::Join(bid.to_string())
+                        )
+                    },
+
+                    job::Kind::Assumption(bid) => {
+                        info!("Assumption `{}` is proved for `{}`", bid, job.id);
+                        (
+                            bid,
+                            ProofKind::Assumption(bid, proof_blob.clone()),
+                            db::ProveKind::Assumption(bid.to_string())
+                        )
+                    },
+
+                    job::Kind::Groth16(bid) => {
+                        info!("Groth16 extraction `{}` is finished for `{}`", bid, job.id);
+                        (
+                            bid,
+                            ProofKind::Groth16(bid, proof_blob.clone()),
+                            db::ProveKind::Assumption(bid.to_string())
+                        )
+                    },
                 };
-                let blob_hash = xxh3_128(&res.blob);
-                // record to db                
+                let hash = xxh3_128(&proof_blob);
+                // record to db
+                let input_hashes = job
+                    .input_blobs
+                    .values()
+                    .map(|b| xxh3_128(b).to_string())
+                    .collect();
                 db_insert_futures.push(
                     col_proofs.insert_one(
                         db::Proof {
-                            client_job_id: job.base_id.clone(),
-                            job_id: job.id.clone(),
-                            kind: db::JobKind::Zkr(claim_digest),
-                            owner: job.owner.to_string(),
-                            input_blobs: job.input_blobs.values().cloned().collect(),
-                            blob: res.blob.clone(),                    
-                            hash: blob_hash
+                            job_id: job.id.to_string(),
+                            kind: db_prove_kind,
+                            input_hashes: input_hashes,
+                            owner: job.owner.to_bytes(),
+                            blob: proof_blob.clone(),    
+                            hash: hash.to_string(),                
                         }
                     )
                     .into_future()
                 );
 
-                job.proof = Some(
-                    job::Proof {
-                        hash: blob_hash,
-                        blob: res.blob.clone()
-                    }
-                );
-
-                let _ = swarm
+                let _req_id = swarm
                     .behaviour_mut()
                     .req_resp
                     .send_request(
                         &job.owner,
                         protocol::Request::ProofIsReady(
                             ProofToken {
-                                job_id: job.base_id.clone(),
-                                kind: protocol::ProofKind::Assumption(
-                                    claim_digest,
-                                    res.blob
-                                ),
-                                hash: blob_hash
+                                job_id: job.id,
+                                kind: proof_kind,
+                                hash: hash
                             }
                         )
-                    ); 
-            },
-
-            // batch is proved
-            er = aggregate_futures.select_next_some() => {
-                if let Err(failed) = er {
-                    warn!("Failed to run the prove job: `{:#?}`", failed);       
-                    //@ wtd with job?
-                    let job = jobs.get_mut(&failed.job_id).unwrap();
-                    job.status = job::Status::ExecutionFailed(failed.err_msg);
-                    continue;
+                    );
+                // start a new prove
+                if let Some(j) = ready_jobs.pop_front() {
+                    prove_futures.push(
+                        spawn_prove(
+                            j.input_blobs.values().cloned().collect(),
+                            j.kind.clone()
+                        )
+                    );
+                    active_job = Some(j);
                 }
-                let res = er.unwrap();
-                let job = jobs.get_mut(&res.job_id).unwrap();
-                job.status = job::Status::ExecutionSucceded;
-                info!("Aggregate job `{}` is proved.", res.job_id);
-                let batch_id = match job.kind { 
-                    job::Kind::Segment(id) | job::Kind::Join(id) => id,
-                    
-                    _ => {
-                        warn!("No batch id is available for `{:?}`.", job.kind);
-                        u32::MAX
-                    }
-                };
-                let blob_hash = xxh3_128(&res.blob);
-                // record to db                
-                db_insert_futures.push(
-                    col_proofs.insert_one(
-                        db::Proof {
-                            client_job_id: job.base_id.clone(),
-                            job_id: job.id.clone(),
-                            kind: db::JobKind::Segment(batch_id),
-                            owner: job.owner.to_string(),
-                            input_blobs: job.input_blobs.values().cloned().collect(),
-                            blob: res.blob.clone(),
-                            hash: blob_hash,
-                        }
-                    )
-                    .into_future()
-                );
 
-                job.proof = Some(
-                    job::Proof {
-                        hash: blob_hash,
-                        blob: res.blob
-                    }
-                );
-
-                let _ = swarm
-                    .behaviour_mut()
-                    .req_resp
-                    .send_request(
-                        &job.owner,
-                        protocol::Request::ProofIsReady(
-                            protocol::ProofToken {
-                                job_id: job.base_id.clone(),
-                                kind: protocol::ProofKind::Aggregate(batch_id),
-                                hash: blob_hash
-                            }
-                        )
-                    ); 
-            },            
-
-            // groth16 job is finished
-            er = groth16_futures.select_next_some() => {                
-                if let Err(failed) = er {
-                    warn!("Failed to run the groth16 job: `{:#?}`", failed);       
-                    //@ wtd with job?
-                    let job = jobs.get_mut(&failed.job_id).unwrap();
-                    job.status = job::Status::ExecutionFailed(failed.err_msg);
-                    continue;
-                }
-                let res = er.unwrap();
-                let job = jobs.get_mut(&res.job_id).unwrap();
-                job.status = job::Status::ExecutionSucceded;
-                info!("`groth16` extraction is finished for `{}`.", res.job_id);
-                let blob_hash = xxh3_128(&res.blob);
-                // record to db                
-                db_insert_futures.push(
-                    col_proofs.insert_one(
-                        db::Proof {
-                            client_job_id: job.base_id.clone(),
-                            job_id: job.id.clone(),
-                            kind: db::JobKind::Groth16,
-                            owner: job.owner.to_string(),
-                            input_blobs: job.input_blobs.values().cloned().collect(),
-                            blob: res.blob.clone(),       
-                            hash: blob_hash,             
-                        }
-                    )
-                    .into_future()
-                );
-
-                job.proof = Some(
-                    job::Proof {
-                        hash: blob_hash,
-                        blob: res.blob.clone() 
-                    }
-                );
-                
-                let _ = swarm
-                    .behaviour_mut()
-                    .req_resp
-                    .send_request(
-                        &job.owner,
-                        protocol::Request::ProofIsReady(
-                            protocol::ProofToken {
-                                job_id: job.base_id.clone(),
-                                kind: protocol::ProofKind::Groth16(res.blob),
-                                hash: blob_hash,
-                            }
-                        )
-                    );                
-
-            },            
+            },                        
 
             res = db_insert_futures.select_next_some() => {
                 match res {
@@ -836,12 +658,8 @@ async fn mongodb_setup(
     uri: &str,
 ) -> anyhow::Result<mongodb::Client> {
     info!("Connecting to the MongoDB daemon...");
-    let mut client_options = ClientOptions::parse(
-        uri
-    ).await?;
-    let server_api = ServerApi::builder().version(
-        ServerApiVersion::V1
-    ).build();
+    let mut client_options = ClientOptions::parse(uri).await?;
+    let server_api = ServerApi::builder().version(ServerApiVersion::V1).build();
     client_options.server_api = Some(server_api);
     let client = mongodb::Client::with_options(client_options)?;
     // Send a ping to confirm a successful connection
@@ -853,40 +671,42 @@ async fn mongodb_setup(
     Ok(client)
 }
 
-// #[derive(Debug, Clone)]
-// struct DBInsertResult {
-//     job_id: String,
+async fn spawn_prove(
+    input_blobs: Vec<Vec<u8>>,
+    kind: job::Kind
+) -> anyhow::Result<Vec<u8>>{
+    let (tx, rx) = mpsc::channel();   
+    let handle = thread::spawn(move || 
+        if let Err(e) = tx.send(r0::prove(input_blobs, kind)) {
+            warn!("Failed to share the prove result with the main thread: `{e:?}`");
+        }
+    );
+    loop {
+        if handle.is_finished() {
+            break 
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = handle.join();
+    rx.recv()?
+}
 
-//     inserted_id: Bson,    
-// }
-
-// #[derive(Debug, Clone)]
-// struct DBInsertError {
-//     job_id: String,
-
-//     err_msg: String,    
-// }
-
-// async fn insert_into_db(
-//     col_proofs: &mongodb::Collection<db::Proof>,
-//     db_proof: db::Proof
-// ) -> anyhow::Result<DBInsertResult, DBInsertError> {
-//     let job_id = db_proof.job_id.clone();
-//     col_proofs
-//     .insert_one(db_proof)
-//     .await
-//     .and_then(|insert_result| 
-//         Ok(
-//             DBInsertResult {
-//                 job_id: job_id.clone(),
-//                 inserted_id: insert_result.inserted_id
-//             }
-//         )
-//     )
-//     .map_err(|e|
-//         DBInsertError {        
-//             job_id: job_id,
-//             err_msg: e.to_string()
-//         }
-//     )
-// }
+// look up proof in the db
+async fn lookup_proof(
+    col_proofs: &mongodb::Collection<db::Proof>,
+    hash: u128
+) -> anyhow::Result<Vec<u8>> {
+    if let Some(proof) = col_proofs.find(
+        doc! {
+            "hash": hash.to_string()
+        }
+    )
+    .await?
+    .try_next()
+    .await?
+    {
+        Ok(proof.blob)
+    } else {
+        Err(anyhow::Error::msg("Blob not found."))
+    }    
+}

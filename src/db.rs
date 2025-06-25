@@ -3,32 +3,29 @@ use serde::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum JobKind {
-    Keccak([u8; 32]),
+pub enum ProveKind {
+    Assumption(String),
 
-    Zkr([u8; 32]),
+    Segment(String),
 
-    Segment(u32),
-
-    Join(u32),
+    Join(String),
     
-    Groth16,
+    Groth16(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Proof {   
-    // job_id assigned by the client 
-    pub client_job_id: String,
-    // job_id from prover pov: job_id+item_id
+pub struct Proof {  
+    // as specified by the client 
     pub job_id: String,
 
-    pub kind: JobKind,
+    // hash of the input blobs
+    pub input_hashes: Vec<String>,   
+
+    pub kind: ProveKind,
 
     // the client
-    pub owner: String,
+    pub owner: Vec<u8>,
 
-    pub input_blobs: Vec<Vec<u8>>,    
     pub blob: Vec<u8>,    
-    pub hash: u128,
-
+    pub hash: String,
 }
