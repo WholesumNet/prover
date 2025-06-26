@@ -3,8 +3,8 @@ use risc0_zkvm::{
     SuccinctReceipt, ReceiptClaim, Unknown,
     Groth16Receipt, Groth16ReceiptVerifierParameters,
     Asset, AssetRequest,
-    ProveKeccakRequest, ProveZkrRequest,
-    sha::Digestible,
+    ProveKeccakRequest,
+    Digest, sha::Digestible
 };
 
 use log::info;
@@ -13,9 +13,7 @@ use anyhow;
 use crate::job;
 use job::Kind;
 
-use peyk::protocol::{
-    KeccakRequestObject, ZkrRequestObject
-};
+use peyk::protocol::KeccakRequestObject;
 
 // prove and lift the segment
 fn prove_and_lift_segment(
@@ -105,51 +103,22 @@ fn aggregate_segments(
 }
 
 fn prove_keccak(
-    keccak_req: ProveKeccakRequest,
-) -> anyhow::Result<SuccinctReceipt<Unknown>> { 
-    ApiClient::from_env()?
-        .prove_keccak(keccak_req, AssetRequest::Inline)
-}
-
-fn prove_zkr(
-    zkr_req: ProveZkrRequest
-) -> anyhow::Result<SuccinctReceipt<Unknown>> {
-    ApiClient::from_env()?
-        .prove_zkr(zkr_req, AssetRequest::Inline)
-}
-
-fn prove_assumption(
     blob: Vec<u8>,
 ) -> anyhow::Result<Vec<u8>> {
-    if let Ok(k) = bincode::deserialize::<KeccakRequestObject>(&blob) {
-        // it's a keccak request
-        let keccak_req = ProveKeccakRequest {
-            claim_digest: k.claim_digest.into(),
-            po2: k.po2,
-            control_root: k.control_root.into(),
-            input: k.input
-        };
-        info!(
-            "Proving Keccak request `{:?}`",
-            keccak_req.claim_digest,
-        );
-        Ok(bincode::serialize(&prove_keccak(keccak_req)?)?)
-    } else if let Ok(z) = bincode::deserialize::<ZkrRequestObject>(&blob) {
-        // it's a zkr request
-        let zkr_req = ProveZkrRequest {
-            claim_digest: z.claim_digest.into(),
-            control_id: z.control_id.into(),
-            input: z.input
-        };
-        info!(
-            "Proving Zkr request `{:?}`",
-            zkr_req.claim_digest,
-        );
-        Ok(bincode::serialize(&prove_zkr(zkr_req)?)?)
-    } else {
-        // or an invalid blob
-        Err(anyhow::Error::msg("Invalid blob"))
-    }
+    let kecak_obj = bincode::deserialize::<KeccakRequestObject>(&blob)?;    
+    let claim_digest: Digest = kecak_obj.claim_digest.into();
+    info!("Proving Keccak request `{claim_digest:?}`");        
+    let proof: SuccinctReceipt<Unknown> = ApiClient::from_env()?
+        .prove_keccak(
+            ProveKeccakRequest {
+                claim_digest: claim_digest,
+                po2: kecak_obj.po2,
+                control_root: kecak_obj.control_root.into(),
+                input: kecak_obj.input
+            },
+            AssetRequest::Inline
+        )?;
+    Ok(bincode::serialize(&proof)?)
 }
 
 fn to_groth16(
@@ -189,7 +158,7 @@ pub fn prove(
 
         Kind::Assumption(_) => {            
             let first = blobs.into_iter().next().unwrap();
-            prove_assumption(first)
+            prove_keccak(first)
         },
 
         Kind::Groth16(_) => {
