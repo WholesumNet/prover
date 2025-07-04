@@ -8,10 +8,10 @@ pub enum Kind {
     // param: batch id
 
     Segment(u128),
-
     Join(u128),
 
-    Assumption(u128),
+    Keccak(u128),
+    Union(u128),
 
     Groth16(u128),
 }
