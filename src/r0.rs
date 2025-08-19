@@ -1,6 +1,7 @@
 use risc0_zkvm::{    
     ApiClient,ProverOpts, 
-    SuccinctReceipt, ReceiptClaim, Unknown,
+    SuccinctReceipt, ReceiptClaim,
+    Unknown, UnionClaim,
     Groth16Receipt, Groth16ReceiptVerifierParameters,
     Asset, AssetRequest,
     ProveKeccakRequest,
@@ -60,8 +61,8 @@ fn join_proofs(
     )
 }
 
-// given a list of segment blobs, aggregate them into a final proof
-// input: n segments
+// given a list of proofs, aggregate them into a final proof
+// input: n proofs
 // output: 1 proof
 fn aggregate_proofs(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
     info!(
@@ -104,11 +105,11 @@ fn aggregate_segments(
 
 fn prove_keccak(
     blob: Vec<u8>,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<SuccinctReceipt<Unknown>> {
     let kecak_obj = bincode::deserialize::<KeccakRequestObject>(&blob)?;    
     let claim_digest: Digest = kecak_obj.claim_digest.into();
     info!("Proving Keccak request `{claim_digest:?}`");        
-    let proof: SuccinctReceipt<Unknown> = ApiClient::from_env()?
+    ApiClient::from_env()?
         .prove_keccak(
             ProveKeccakRequest {
                 claim_digest: claim_digest,
@@ -117,8 +118,76 @@ fn prove_keccak(
                 input: kecak_obj.input
             },
             AssetRequest::Inline
+        )
+}
+
+fn union_keccak(
+    left_proof: SuccinctReceipt<Unknown>,
+    right_proof: SuccinctReceipt<Unknown>,
+) -> anyhow::Result<SuccinctReceipt<Unknown>> {        
+    let r = ApiClient::from_env()?
+        .union(
+            &ProverOpts::succinct(),
+            left_proof.try_into()?,
+            right_proof.try_into()?,
+            AssetRequest::Inline
         )?;
-    Ok(bincode::serialize(&proof)?)
+    Ok(r.into_unknown())
+}
+
+fn union_proofs(
+    left_proof: SuccinctReceipt<Unknown>,
+    right_proof: Vec<u8>,
+) -> anyhow::Result<SuccinctReceipt<Unknown>> {    
+    let r = ApiClient::from_env()?
+        .union(
+            &ProverOpts::succinct(),
+            left_proof.try_into()?,
+            Asset::Inline(right_proof.into()),
+            AssetRequest::Inline
+        )?;
+    Ok(r.into_unknown())
+}
+
+// given a list of keccak prove request blobs, aggregate them into a final proof
+// input: n segments
+// output: 1 proof
+fn aggregate_keccaks(
+    blobs: Vec<Vec<u8>>
+) -> anyhow::Result<Vec<u8>> {
+    info!(
+        "Proving keccak requests, `{}` operation(s) in total.",
+        blobs.len()
+    );
+    let mut receipts = Vec::new();
+    for blob in blobs.into_iter() {
+        receipts.push(prove_keccak(blob)?);
+    }
+    info!(
+        "Union keccak receipts, `{}` operation(s) in total.",
+        receipts.len() - 1
+    );
+    let first = receipts.remove(0);
+    receipts
+        .into_iter()
+        .try_fold(first, |agg, r| union_keccak(agg, r))
+        .and_then(|proof| Ok(bincode::serialize(&proof)?))
+}
+
+// given a list of keccak proofs, aggregate them into a final proof
+// input: n proofs
+// output: 1 proof
+fn aggregate_assumptions(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
+    info!(
+        "Aggregating keccak proofs, `{}` operations in total.",
+        blobs.len() - 1
+    );
+    let first: SuccinctReceipt<Unknown> = bincode::deserialize(&blobs[0])?;    
+    blobs
+        .into_iter()
+        .skip(1)
+        .try_fold(first, |agg, r| union_proofs(agg, r))            
+        .and_then(|proof| Ok(bincode::serialize(&proof)?))        
 }
 
 fn to_groth16(
@@ -156,9 +225,12 @@ pub fn prove(
             aggregate_proofs(blobs)
         },        
 
-        Kind::Assumption(_) => {            
-            let first = blobs.into_iter().next().unwrap();
-            prove_keccak(first)
+        Kind::Keccak(_) => {            
+            aggregate_keccaks(blobs)
+        },
+
+        Kind::Union(_) => {            
+            aggregate_assumptions(blobs)
         },
 
         Kind::Groth16(_) => {

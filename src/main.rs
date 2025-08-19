@@ -309,7 +309,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     if !ready_jobs.is_empty() {
                         continue;
                     }
-                    info!("Gossip: need `{need:?}`");
+                    // info!("Gossip: need `{need:?}`");
                     match need {
                         NeedKind::Prove(_num_jobs) => {
                             let _req_id = swarm
@@ -407,33 +407,54 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
                         protocol::Response::Job(compute_job) => {                            
                             match compute_job.kind {
-                                protocol::JobKind::Assumption(assumption_details) => {
+                                protocol::JobKind::Assumption(ass_details) => {
                                     info!(
                                         "Received assumption job from peer `{}`",
                                         client_peer_id
                                     );
-                                    let (batch_id, blob) = {
-                                        let ib = &assumption_details.batch[0];
-                                        if let protocol::InputBlob::Blob(b) = &ib.1 {
-                                            (ib.0, b.clone())
-                                        } else {
-                                            warn!(
-                                                "Input blob should be of blob kind but is: `{:?}`",
-                                                ib.1                                                
-                                            );
-                                            continue
-                                        }
-                                    };                                    
-                                    ready_jobs.push_back(Job {
+                                    let mut input_blobs = BTreeMap::new();
+                                    let mut prerequisites = BTreeMap::new();
+                                    let mut pending_blobs = HashMap::new();
+                                    for (i, input_blob) in ass_details.batch.into_iter().enumerate() {
+                                        match input_blob {
+                                            InputBlob::Blob(b) => {
+                                                input_blobs.insert(i, b);
+                                            },
+
+                                            InputBlob::Token(hash, owner) => {
+                                                if let Ok(blob) = lookup_proof(&col_proofs, hash).await {
+                                                    input_blobs.insert(i, blob.clone());
+                                                } else {                                                        
+                                                    prerequisites.insert(
+                                                        i, 
+                                                        job::Token {
+                                                            hash: hash,
+                                                            owner: owner
+                                                        }
+                                                    );
+                                                    pending_blobs.insert(hash, ass_details.id as usize);
+                                                }
+                                            }
+                                        };
+                                    }
+                                    let ready_for_proving = prerequisites.is_empty();
+                                    let job = Job {
                                         id: compute_job.id,
                                         owner: client_peer_id,
-                                        kind: job::Kind::Assumption(batch_id),
-                                        input_blobs: BTreeMap::from([
-                                            (0, blob)
-                                        ]),
-                                        prerequisites: BTreeMap::new(),
-                                        pending_blobs: HashMap::new(),
-                                    });
+                                        kind: if ass_details.blobs_are_keccak { 
+                                            job::Kind::Keccak(ass_details.id)
+                                        } else {
+                                            job::Kind::Union(ass_details.id)
+                                        },
+                                        input_blobs: input_blobs,
+                                        prerequisites: prerequisites,
+                                        pending_blobs: pending_blobs,
+                                    };
+                                    if ready_for_proving {
+                                        ready_jobs.push_back(job);                                        
+                                    } else {                                        
+                                        pending_jobs.push(job);
+                                    }                   
                                 },                                
 
                                 protocol::JobKind::Aggregate(agg_details) => {
@@ -565,11 +586,20 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         )
                     },
 
-                    job::Kind::Assumption(bid) => {
-                        info!("Assumption `{}` is proved for `{}`", bid, job.id);
+                    job::Kind::Keccak(bid) => {
+                        info!("Keccak aggregate `{}` is proved for `{}`", bid, job.id);
                         (
                             bid,
-                            ProofKind::Assumption(bid, proof_blob.clone()),
+                            ProofKind::Assumption(bid),
+                            db::ProveKind::Assumption(bid.to_string())
+                        )
+                    },
+
+                    job::Kind::Union(bid) => {
+                        info!("Union aggregate `{}` is proved for `{}`", bid, job.id);
+                        (
+                            bid,
+                            ProofKind::Assumption(bid),
                             db::ProveKind::Assumption(bid.to_string())
                         )
                     },
