@@ -1,11 +1,23 @@
-[package]
-name = "prover"
+[workspace]
+members = [    
+    "zkvm",
+    "bin"
+]
+exclude = []
+resolver = "2"
+
+[profile.release-with-debug]
+inherits = "release"
+debug-assertions = true
+debug = true
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
+[workspace.dependencies]
 serde = {version = "1.0", features = ["derive"]}
 toml = "0.7"
 futures = "0.3.28"
@@ -25,9 +37,14 @@ rand = "0.8.5"
 base64 = "0.22.1"
 mongodb = "3.1.0"
 chrono = { version = "0.4.38", features = ["serde"] }
-risc0-zkvm = { version = "^2.3", features = ["prove", "unstable"] }
 tokio = "1.45.1"
 tokio-stream = "0.1.17"
+
+# r0
+risc0-zkvm = { version = "2.3.1", features = ["prove", "unstable"] }
+# sp1
+sp1-zkvm = { version = "=4.1.7"}
+
 
 peyk = { path = "../peyk" }
 

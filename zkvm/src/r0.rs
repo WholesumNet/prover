@@ -1,7 +1,7 @@
 use risc0_zkvm::{    
     ApiClient,ProverOpts, 
     SuccinctReceipt, ReceiptClaim,
-    Unknown, UnionClaim,
+    Unknown,
     Groth16Receipt, Groth16ReceiptVerifierParameters,
     Asset, AssetRequest,
     ProveKeccakRequest,
@@ -10,9 +10,6 @@ use risc0_zkvm::{
 
 use log::info;
 use anyhow;
-
-use crate::job;
-use job::Kind;
 
 use peyk::protocol::KeccakRequestObject;
 
@@ -64,7 +61,7 @@ fn join_proofs(
 // given a list of proofs, aggregate them into a final proof
 // input: n proofs
 // output: 1 proof
-fn aggregate_proofs(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
+pub fn aggregate_proofs(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
     info!(
         "Aggregating proofs, `{}` operations in total.",
         blobs.len() - 1
@@ -80,7 +77,7 @@ fn aggregate_proofs(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
 // given a list of segment blobs, aggregate them into a final proof
 // input: n segments
 // output: 1 proof
-fn aggregate_segments(
+pub fn aggregate_segments(
     blobs: Vec<Vec<u8>>
 ) -> anyhow::Result<Vec<u8>> {
     info!(
@@ -152,7 +149,7 @@ fn union_proofs(
 // given a list of keccak prove request blobs, aggregate them into a final proof
 // input: n segments
 // output: 1 proof
-fn aggregate_keccaks(
+pub fn aggregate_keccaks(
     blobs: Vec<Vec<u8>>
 ) -> anyhow::Result<Vec<u8>> {
     info!(
@@ -177,7 +174,7 @@ fn aggregate_keccaks(
 // given a list of keccak proofs, aggregate them into a final proof
 // input: n proofs
 // output: 1 proof
-fn aggregate_assumptions(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
+pub fn aggregate_assumptions(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
     info!(
         "Aggregating keccak proofs, `{}` operations in total.",
         blobs.len() - 1
@@ -190,7 +187,7 @@ fn aggregate_assumptions(blobs: Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
         .and_then(|proof| Ok(bincode::serialize(&proof)?))        
 }
 
-fn to_groth16(
+pub fn to_groth16(
     blob: Vec<u8>
 ) -> anyhow::Result<Vec<u8>> {
     info!("Extracting Groth16 proof...");
@@ -212,30 +209,3 @@ fn to_groth16(
     Ok(bincode::serialize(&groth16_proof)?)
 }
 
-pub fn prove(
-    blobs: Vec<Vec<u8>>,
-    kind: Kind
-) -> anyhow::Result<Vec<u8>> {    
-    match kind {
-        Kind::Segment(_) => {
-            aggregate_segments(blobs)
-        },
-
-        Kind::Join(_) => {
-            aggregate_proofs(blobs)
-        },        
-
-        Kind::Keccak(_) => {            
-            aggregate_keccaks(blobs)
-        },
-
-        Kind::Union(_) => {            
-            aggregate_assumptions(blobs)
-        },
-
-        Kind::Groth16(_) => {
-            let first = blobs.into_iter().next().unwrap();
-            to_groth16(first)
-        }
-    }
-}

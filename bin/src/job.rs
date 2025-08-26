@@ -2,19 +2,7 @@ use std::collections::{
     HashMap, BTreeMap
 };
 use libp2p::PeerId;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Kind {
-    // param: batch id
-
-    Segment(u128),
-    Join(u128),
-
-    Keccak(u128),
-    Union(u128),
-
-    Groth16(u128),
-}
+use zkvm::JobKind;
 
 #[derive(Debug, Clone)]
 pub struct Token {
@@ -34,7 +22,7 @@ pub struct Job {
     // the client
     pub owner: PeerId,
 
-    pub kind: Kind,
+    pub kind: JobKind,
 
     pub input_blobs: BTreeMap<usize, Vec<u8>>,
 
