@@ -8,9 +8,12 @@ env_logger.workspace = true
 log.workspace = true
 bincode.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
 
-risc0-zkvm.workspace = true
+# r0
+risc0-zkvm = { version = "2.3.1", features = ["prove", "unstable"] }
 
-sp1-zkvm.workspace = true
+# sp1
+sp1-sdk = { version = "4.1.7" }
 
 peyk.workspace = true

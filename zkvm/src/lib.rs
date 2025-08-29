@@ -22,9 +22,14 @@ pub enum R0Op {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SP1Op {
-    Shard,
+    Execute(ELFKind),
+}
 
-    Join,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ELFKind {
+    Subblock,
+
+    Agg
 }
 
 pub fn run(
@@ -59,9 +64,16 @@ pub fn run(
 
         JobKind::SP1(sp1_job_kind, _bid) => {
             match sp1_job_kind {
-                SP1Op::Shard => todo!{},
+                SP1Op::Execute(elf_kind) => {
+                    let elf_name = match elf_kind {
+                        ELFKind::Subblock => "subblock",
 
-                SP1Op::Join => todo!{},
+                        ELFKind::Agg => "agg"
+                    };
+                    let elf_path = format!("./elfs/{elf_name}_elf.bin");
+                    let first = blobs.into_iter().next().unwrap();
+                    sp1::execute_elf(&elf_path, first)
+                },
             }
         }
     }

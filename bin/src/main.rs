@@ -63,7 +63,7 @@ use peyk::{
         ProofKind
     },
     protocol::Request::{
-        WouldProve,
+        Would,
         TransferBlob,
     },
 };
@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     let mut pending_jobs = Vec::new();
 
     // pull jobs to completion
-    let mut prove_futures = FuturesUnordered::new();
+    let mut run_futures = FuturesUnordered::new();
 
     let col_proofs = db_client
         .database("wholesum_prover")
@@ -298,7 +298,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     message,
                     ..
                 })) => {
-                    let need: NeedKind = match bincode::deserialize(&message.data) {
+                    let _need: NeedKind = match bincode::deserialize(&message.data) {
                         Ok(n) => n,
 
                         Err(e) => {
@@ -311,26 +311,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         continue;
                     }
                     // info!("Gossip: need `{need:?}`");
-                    match need {
-                        NeedKind::Prove(_num_jobs) => {
-                            let _req_id = swarm
-                                .behaviour_mut().req_resp
-                                .send_request(
-                                    &peer_id,
-                                    WouldProve,
-                                );
-                        },
-
-                        NeedKind::Groth16(_nonce) => {
-                            //@ handle mac os compatibility
-                            let _req_id = swarm
-                                .behaviour_mut().req_resp
-                                .send_request(
-                                    &peer_id,
-                                    WouldProve,
-                                );
-                        }                        
-                    };
+                    let _req_id = swarm
+                        .behaviour_mut().req_resp
+                        .send_request(
+                            &peer_id,
+                            Would,
+                        );                     
                 },
 
                 // requests
@@ -395,7 +381,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             if active_job.is_none() {
                                 // prove it
                                 if let Some(j) = ready_jobs.pop_front() {
-                                    prove_futures.push(
+                                    run_futures.push(
                                         spawn_run(
                                             j.input_blobs.values().cloned().collect(),
                                             j.kind.clone()
@@ -542,15 +528,48 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 },
 
                                 protocol::JobKind::SP1(sp1_op) => match sp1_op {
-                                    protocol::SP1Op::Execute => todo!{},
-                                    protocol::SP1Op::Shard => todo!{},
-                                    protocol::SP1Op::Join => todo!{},
+                                    protocol::SP1Op::Execute(execute_details) => {
+                                        info!(
+                                            "Received execute job from peer `{}`",
+                                            client_peer_id
+                                        );
+                                        let blob = {
+                                            let ib = &execute_details.batch[0];
+                                            if let protocol::InputBlob::Blob(b) = &ib {
+                                                b.clone()
+                                            } else {
+                                                warn!(
+                                                    "Input blob should be of blob kind but is: `{:?}`",
+                                                    ib                                                
+                                                );
+                                                continue
+                                            }
+                                        };
+                                        let elf_kind = match execute_details.elf_kind {
+                                            protocol::ELFKind::Subblock => zkvm::ELFKind::Subblock,
+
+                                            protocol::ELFKind::Agg => zkvm::ELFKind::Agg,
+                                        };
+                                        ready_jobs.push_back(Job {
+                                            id: compute_job.id,
+                                            owner: client_peer_id,
+                                            kind: zkvm::JobKind::SP1(
+                                                zkvm::SP1Op::Execute(elf_kind),
+                                                execute_details.id
+                                            ),
+                                            input_blobs: BTreeMap::from([
+                                                (0, blob)
+                                            ]),
+                                            prerequisites: BTreeMap::new(),
+                                            pending_blobs: HashMap::new(),
+                                        });
+                                    },
                                 }
                             };
                             if active_job.is_none() {
                                 // prove it
                                 if let Some(j) = ready_jobs.pop_front() {
-                                    prove_futures.push(
+                                    run_futures.push(
                                         spawn_run(
                                             j.input_blobs.values().cloned().collect(),
                                             j.kind.clone()
@@ -568,7 +587,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 },
             },
 
-            res = prove_futures.select_next_some() => {
+            res = run_futures.select_next_some() => {
                 if let Err(e) = res {
                     let job = active_job.take().unwrap();                    
                     warn!("Failed to run job `{}`: `{:?}`", job.id, e);
@@ -577,7 +596,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 let proof_blob = res.unwrap();
                 let job = active_job.take().unwrap();
                 let (_batch_id, proof_kind, db_prove_kind) = match job.kind {
-                    zkvm::JobKind::R0(r0_kind, bid) => match r0_kind {
+                    zkvm::JobKind::R0(r0_op, bid) => match r0_op {
                         zkvm::R0Op::Segment => {
                             info!("Segment aggregate `{}` is proved for `{}`", bid, job.id);
                             (
@@ -624,10 +643,16 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         },
                     },
 
-                    zkvm::JobKind::SP1(sp1_kind, _bid) => match sp1_kind {
-                        zkvm::SP1Op::Shard => todo!{},
-                        zkvm::SP1Op::Join => todo!{},
-                    }
+                    zkvm::JobKind::SP1(sp1_op, bid) => match sp1_op {
+                        zkvm::SP1Op::Execute(_elf_kind) => {
+                            info!("Execution suceeded for `{bid}`!");
+                            (
+                                bid,
+                                ProofKind::Aggregate(bid),
+                                db::ProveKind::Segment(bid.to_string())
+                            )
+                        }
+                    },
                 };
                 let hash = xxh3_128(&proof_blob);
                 // record to db
@@ -665,7 +690,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     );
                 // start a new prove
                 if let Some(j) = ready_jobs.pop_front() {
-                    prove_futures.push(
+                    run_futures.push(
                         spawn_run(
                             j.input_blobs.values().cloned().collect(),
                             j.kind.clone()
