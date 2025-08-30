@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     info!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
 
     // Libp2p swarm 
-    let mut swarm = peyk::p2p::setup_swarm(&local_key).await?;
+    let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
     let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
     let _ = swarm
         .behaviour_mut()
