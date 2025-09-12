@@ -15,7 +15,11 @@ pub fn execute_elf(
     let client = ProverClient::builder().cpu().build();
     let stdin: SP1Stdin = bincode::deserialize(&blob)?;    
     let elf = fs::read(elf_path)?;
-    let (public_values, report) = client.execute(&elf, &stdin).run().unwrap();
+    let (public_values, report) = client
+        .execute(&elf, &stdin)
+        .deferred_proof_verification(false)
+        .run()
+        .unwrap();
     info!("Subblock instruction count: {}", report.total_instruction_count());
     Ok(public_values.to_vec())
 } 
