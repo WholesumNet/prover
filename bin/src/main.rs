@@ -588,6 +588,67 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             );
                                         }
                                     },
+
+                                    protocol::SP1Op::ProveCompressed(prove_compressed_details) => {
+                                        info!("Received ProveCompress job from `{client_peer_id}`.");
+                                        let elf_kind = match prove_compressed_details.elf_kind {
+                                            protocol::ELFKind::Subblock => zkvm::ELFKind::Subblock,
+
+                                            protocol::ELFKind::Agg => zkvm::ELFKind::Agg,
+                                        };
+                                        let mut job = Job::new(
+                                            compute_job.id,
+                                            client_peer_id,
+                                            zkvm::JobKind::SP1(
+                                                zkvm::SP1Op::ProveCompressed(elf_kind),
+                                                prove_compressed_details.id
+                                            )
+                                        );
+                                        let mut get_blob_info_list = Vec::new();
+                                        for (i, input_blob) in prove_compressed_details.batch.iter().enumerate() {
+                                            match input_blob {
+                                                InputBlob::Blob(b) => {
+                                                    warn!("Input blob should be of token kind but is: `{b:?}`");
+                                                    continue
+                                                },
+
+                                                InputBlob::Token(hash, owner) => {
+                                                    let owner_peer_id = match PeerId::from_bytes(owner) {
+                                                        Ok(p) => p,
+
+                                                        Err(e) => {
+                                                            warn!("PeerId is invalid: {e:?}");
+                                                            continue
+                                                        }
+                                                    };
+                                                    job.add_pending_blob(
+                                                        i,
+                                                        job::Token {
+                                                            hash: *hash,
+                                                            owner: owner_peer_id.clone()
+                                                        }
+                                                    );
+                                                    get_blob_info_list.push((*hash, owner_peer_id));
+                                                }
+                                            };
+                                        }
+                                        pending_jobs.insert(prove_compressed_details.id, job);
+                                        // request blob info
+                                        for (hash, owner_peer_id) in get_blob_info_list.into_iter() {
+                                            let _req_id = swarm
+                                                .behaviour_mut()
+                                                .blob_transfer
+                                                .send_request(
+                                                    &owner_peer_id,
+                                                    blob_transfer::Request::GetInfo(hash)
+                                                );
+                                            info!(
+                                                "Requested info of blob `{}` from `{}`",
+                                                hash,
+                                                owner_peer_id
+                                            );
+                                        }
+                                    },
                                 }
                             };                            
                         }
@@ -757,8 +818,58 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                 )
                                             );
                                     },
-                                }
-                            }
+                                };
+                            },
+
+                            zkvm::SP1Op::ProveCompressed(elf_kind) => {
+                                match elf_kind {
+                                    zkvm::ELFKind::Subblock => {
+                                        info!(
+                                            "Subblock(`{}`) prove is finished for `{}`",
+                                            sub_id,
+                                            job.id
+                                        );
+                                        let proof = res.unwrap();
+                                        let hash = xxh3_128(&proof);
+                                        let _req_id = swarm
+                                            .behaviour_mut()
+                                            .req_resp
+                                            .send_request(
+                                                &job.owner,
+                                                protocol::Request::ProofIsReady(
+                                                    ProofToken {
+                                                        job_id: job.id,
+                                                        kind: protocol::ProofKind::SP1ProveCompressedSubblock(job.get_batch_id()),
+                                                        hash: hash
+                                                    }
+                                                )
+                                            );
+                                    },
+
+                                    zkvm::ELFKind::Agg => {
+                                        info!(
+                                            "Agg(`{}`) prove is finished for `{}`",
+                                            sub_id,
+                                            job.id
+                                        );
+                                        let proof = res.unwrap();
+                                        let hash = xxh3_128(&proof);
+                                        let _req_id = swarm
+                                            .behaviour_mut()
+                                            .req_resp
+                                            .send_request(
+                                                &job.owner,
+                                                protocol::Request::ProofIsReady(
+                                                    ProofToken {
+                                                        job_id: job.id,
+                                                        kind: protocol::ProofKind::SP1ProveCompressedAgg(job.get_batch_id()),
+                                                        hash: hash
+                                                    }
+                                                )
+                                            );
+                                    },
+                                };
+                            },
                         }
                     },
 

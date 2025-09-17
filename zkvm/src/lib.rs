@@ -23,6 +23,8 @@ pub enum R0Op {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SP1Op {
     Execute(ELFKind),
+
+    ProveCompressed(ELFKind),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +65,7 @@ pub fn run(
         },        
 
         JobKind::SP1(sp1_job_kind, _bid) => {
+            let stdin_blob = blobs.into_iter().next().unwrap();
             match sp1_job_kind {
                 SP1Op::Execute(elf_kind) => {
                     let elf_name = match elf_kind {
@@ -71,8 +74,25 @@ pub fn run(
                         ELFKind::Agg => "agg"
                     };
                     let elf_path = format!("./elfs/{elf_name}_elf.bin");
-                    let first = blobs.into_iter().next().unwrap();
-                    sp1::execute_elf(&elf_path, first)
+                    sp1::execute_elf(&elf_path, stdin_blob)
+                },
+
+                SP1Op::ProveCompressed(elf_kind) => {
+                    match elf_kind {
+                        ELFKind::Subblock => {                        
+                            sp1::prove_compressed_subblock(
+                                "./elfs/subblock_elf.bin",
+                                stdin_blob
+                            )
+                        },
+
+                        ELFKind::Agg => {
+                            sp1::prove_compressed_agg(
+                                "./elfs/agg_elf.bin",
+                                stdin_blob
+                            )
+                        }
+                    }                    
                 },
             }
         }
