@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
         .collection::<db::Proof>("proofs");
     
     // futures for mongodb progress saving 
-    let mut db_insert_futures = FuturesUnordered::new();
+    // let mut db_insert_futures = FuturesUnordered::new();
     
     // key 
     let local_key = {
@@ -756,6 +756,64 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     }
                 },
 
+                // blob transfer requests
+                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
+                    peer: _peer_id,
+                    message: request_response::Message::Request {
+                        request,
+                        channel,
+                        //request_id,
+                        ..
+                    }
+                })) => {                
+                    match request {
+                        blob_transfer::Request::GetInfo(hash) => {
+                            if let Some(num_chunks) = pipeline.get_blob_info(hash) {                                
+                                if let Err(e) = swarm
+                                    .behaviour_mut()
+                                    .blob_transfer
+                                        .send_response(
+                                            channel,
+                                            blob_transfer::Response::Info(blob_transfer::BlobInfo {
+                                                hash: hash,                                            
+                                                num_chunks: num_chunks,
+                                            })
+                                        )
+                                {
+                                    warn!("Failed to send back blob info: `{e:?}`");
+                                }
+                            }
+                        },
+
+                        blob_transfer::Request::GetChunk(blob_hash, req_chunk_index) => {
+                            if let Some((data, chunk_hash)) = pipeline.get_blob_chunk(
+                                blob_hash, 
+                                req_chunk_index
+                            ) {
+                                // info!("chunk {req_chunk_index}: {}", data.len());
+                                if let Err(e) = swarm
+                                    .behaviour_mut()
+                                    .blob_transfer
+                                        .send_response(
+                                            channel,
+                                            blob_transfer::Response::Chunk(
+                                                blob_transfer::BlobChunk {
+                                                    blob_hash: blob_hash,
+                                                    index: req_chunk_index,
+                                                    data: data,
+                                                    chunk_hash: chunk_hash,
+                                                }
+                                            )
+                                        )
+                                {
+                                    warn!("Failed to send back the blob chunk: `{e:?}`");
+                                }
+                            }
+                        },
+                    }
+                },
+
+
                 _ => {
                     // println!("{:#?}", event)
                 },
@@ -844,21 +902,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                     }
                                                 )
                                             );
-                                        // record to the db
-                                        db_insert_futures.push(
-                                            col_proofs.insert_one(
-                                                db::Proof {
-                                                    job_id: job.id.to_string(),
-                                                    kind: db::ProveKind::SP1ProveCompressedSubblock(hash.to_string()),
-                                                    input_hashes: job.get_input_hashes(),
-                                                    owner: job.owner.to_bytes(),
-                                                    blob: proof.clone(),    
-                                                    hash: hash.to_string(),                
-                                                }
-                                            )
-                                            .into_future()
-                                        );
-
                                     },
 
                                     zkvm::ELFKind::Agg => {
@@ -882,20 +925,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                     }
                                                 )
                                             );
-                                        // record to the db
-                                        db_insert_futures.push(
-                                            col_proofs.insert_one(
-                                                db::Proof {
-                                                    job_id: job.id.to_string(),
-                                                    kind: db::ProveKind::SP1ProveCompressedAgg(hash.to_string()),
-                                                    input_hashes: job.get_input_hashes(),
-                                                    owner: job.owner.to_bytes(),
-                                                    blob: proof.clone(),    
-                                                    hash: hash.to_string(),                
-                                                }
-                                            )
-                                            .into_future()
-                                        );
                                     },
                                 }
                             },
@@ -975,20 +1004,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     );
                     active_job = Some(job);
                 }
-
-            },                        
-
-            res = db_insert_futures.select_next_some() => {
-                match res {
-                    Ok(oid) => {
-                        info!("DB insert was successful: `{oid:?}`");
-                    },
-
-                    Err(err_msg) => {
-                        warn!("DB insert was failed`{err_msg:?}`");
-                    }
-                }                
-            },
+            },            
         }
     }
 }

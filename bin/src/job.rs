@@ -68,13 +68,6 @@ impl Job {
         self.input_blobs.values().cloned().collect()
     }
 
-    pub fn get_input_hashes(&self) -> Vec<String> {
-        self.input_blobs
-            .values()
-            .map(|b| xxh3_128(b).to_string())
-            .collect()
-    }
-
     pub fn add_pending_blob(&mut self, index: usize, token: Token) {
         self.pending_blobs.insert(token.hash, index);
         self.incomplete_blobs.insert(
