@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
         .collection::<db::Proof>("proofs");
     
     // futures for mongodb progress saving 
-    // let mut db_insert_futures = FuturesUnordered::new();
+    let mut db_insert_futures = FuturesUnordered::new();
     
     // key 
     let local_key = {
@@ -818,7 +818,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                 )
                                             );
                                     },
-                                };
+                                }
                             },
 
                             zkvm::SP1Op::ProveCompressed(elf_kind) => {
@@ -844,6 +844,21 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                     }
                                                 )
                                             );
+                                        // record to the db
+                                        db_insert_futures.push(
+                                            col_proofs.insert_one(
+                                                db::Proof {
+                                                    job_id: job.id.to_string(),
+                                                    kind: db::ProveKind::SP1ProveCompressedSubblock(hash.to_string()),
+                                                    input_hashes: job.get_input_hashes(),
+                                                    owner: job.owner.to_bytes(),
+                                                    blob: proof.clone(),    
+                                                    hash: hash.to_string(),                
+                                                }
+                                            )
+                                            .into_future()
+                                        );
+
                                     },
 
                                     zkvm::ELFKind::Agg => {
@@ -867,10 +882,24 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                     }
                                                 )
                                             );
+                                        // record to the db
+                                        db_insert_futures.push(
+                                            col_proofs.insert_one(
+                                                db::Proof {
+                                                    job_id: job.id.to_string(),
+                                                    kind: db::ProveKind::SP1ProveCompressedAgg(hash.to_string()),
+                                                    input_hashes: job.get_input_hashes(),
+                                                    owner: job.owner.to_bytes(),
+                                                    blob: proof.clone(),    
+                                                    hash: hash.to_string(),                
+                                                }
+                                            )
+                                            .into_future()
+                                        );
                                     },
-                                };
+                                }
                             },
-                        }
+                        };
                     },
 
                     zkvm::JobKind::R0(_op, _sub_id) => {},
@@ -934,41 +963,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 //             )
                 //         }
                 //     },
-                // };
-                // let hash = xxh3_128(&proof_blob);
-                // record to db
-                // let input_hashes = job
-                //     .input_blobs
-                //     .values()
-                //     .map(|b| xxh3_128(b).to_string())
-                //     .collect();
-                // db_insert_futures.push(
-                //     col_proofs.insert_one(
-                //         db::Proof {
-                //             job_id: job.id.to_string(),
-                //             kind: db_prove_kind,
-                //             input_hashes: input_hashes,
-                //             owner: job.owner.to_bytes(),
-                //             blob: proof_blob.clone(),    
-                //             hash: hash.to_string(),                
-                //         }
-                //     )
-                //     .into_future()
-                // );
-
-                // let _req_id = swarm
-                //     .behaviour_mut()
-                //     .req_resp
-                //     .send_request(
-                //         &job.owner,
-                //         protocol::Request::ProofIsReady(
-                //             ProofToken {
-                //                 job_id: job.id,
-                //                 kind: proof_kind,
-                //                 hash: hash
-                //             }
-                //         )
-                //     );
+                // };                
+                
                 // start a new prove
                 if let Some(job) = ready_jobs.pop_front() {
                     run_futures.push(
@@ -982,17 +978,17 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
             },                        
 
-            // res = db_insert_futures.select_next_some() => {
-            //     match res {
-            //         Ok(oid) => {
-            //             info!("DB insert was successful: `{oid:?}`");
-            //         },
+            res = db_insert_futures.select_next_some() => {
+                match res {
+                    Ok(oid) => {
+                        info!("DB insert was successful: `{oid:?}`");
+                    },
 
-            //         Err(err_msg) => {
-            //             warn!("DB insert was failed`{err_msg:?}`");
-            //         }
-            //     }                
-            // },
+                    Err(err_msg) => {
+                        warn!("DB insert was failed`{err_msg:?}`");
+                    }
+                }                
+            },
         }
     }
 }

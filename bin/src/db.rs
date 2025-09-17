@@ -11,6 +11,9 @@ pub enum ProveKind {
     Join(String),
     
     Groth16(String),
+
+    SP1ProveCompressedSubblock(String),
+    SP1ProveCompressedAgg(String)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
