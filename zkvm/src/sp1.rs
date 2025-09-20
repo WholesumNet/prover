@@ -32,13 +32,12 @@ pub fn prove_compressed_subblock(
     stdin_blob: Vec<u8>,
 ) -> anyhow::Result<Vec<u8>> {    
     info!("Proving Subblock ELF...");    
-    let client = ProverClient::builder().cpu().build();
+    let client = ProverClient::builder().cuda().build();
     let stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;    
     let elf = fs::read(elf_path)?;
     let (pk, _vk) = client.setup(&elf);
     let proof = client
         .prove(&pk, &stdin)
-        .deferred_proof_verification(false)
         .compressed()
         .run()?;
     Ok(bincode::serialize(&proof)?)
@@ -51,7 +50,7 @@ pub fn prove_compressed_agg(
 ) -> anyhow::Result<Vec<u8>> {    
     info!("Proving Agg ELF...");
     let elf = fs::read(elf_path)?;
-    let client = ProverClient::builder().cpu().build();
+    let client = ProverClient::builder().cuda().build();
     let (pk, vk) = client.setup(&elf);
     let mut stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;
     for proof_blob in subblock_proofs.into_iter() {
