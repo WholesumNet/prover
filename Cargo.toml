@@ -41,4 +41,5 @@ tokio = "1.45.1"
 tokio-stream = "0.1.17"
 
 peyk = { path = "../peyk" }
+anbar = { path = "../anbar" }
 

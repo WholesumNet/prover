@@ -13,7 +13,6 @@ use std::{
     time::Duration,
     collections::{
         HashMap,
-        BTreeMap,
         VecDeque
     },
     future::IntoFuture,
@@ -60,7 +59,6 @@ use peyk::{
         NeedKind,
         InputBlob,
         ProofToken,
-        ProofKind
     },
     protocol::Request::{
         Would,
@@ -70,10 +68,10 @@ use peyk::{
 };
 
 use zkvm;
+use anbar;
 
 mod job;
 use job::Job;
-mod db;
 
 // CLI
 #[derive(Parser, Debug)]
@@ -113,12 +111,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     // pull jobs to completion
     let mut run_futures = FuturesUnordered::new();
 
-    let col_proofs = db_client
-        .database("wholesum_prover")
-        .collection::<db::Proof>("proofs");
+    // let col_proofs = db_client
+    //     .database("wholesum_prover")
+    //     .collection::<db::Proof>("proofs");
     
     // futures for mongodb progress saving 
     // let mut db_insert_futures = FuturesUnordered::new();
+
+    // blob store
+    let mut blob_store = anbar::BlobStore::new();
     
     // key 
     let local_key = {
@@ -324,13 +325,13 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     peer: _peer_id,
                     message: request_response::Message::Request {
                         request,
-                        channel,
-                        //request_id,
+                        // channel,
+                        // request_id,
                         ..
                     }
                 })) => {                
                     match request {
-                        TransferBlob(hash) => {
+                        TransferBlob(_hash) => {
                             // if let Ok(blob) = lookup_proof(&col_proofs, hash).await {
                             //     let _req_id = swarm
                             //         .behaviour_mut()
@@ -361,7 +362,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     }
                 })) => {                
                     match response {
-                        protocol::Response::BlobIsReady(blob) => {
+                        protocol::Response::BlobIsReady(_blob) => {
                             // let hash = xxh3_128(&blob);
                             // pending_jobs.retain_mut(|job| { 
                             //     if !job.pending_blobs.contains_key(&hash) {
@@ -528,66 +529,58 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                 },
 
                                 protocol::JobKind::SP1(sp1_op) => match sp1_op {
-                                    protocol::SP1Op::Execute(execute_details) => {
-                                        info!("Received execute job from `{client_peer_id}`.");
-                                        let elf_kind = match execute_details.elf_kind {
-                                            protocol::ELFKind::Subblock => zkvm::ELFKind::Subblock,
+                                    // protocol::SP1Op::Execute(execute_details) => {
+                                    //     info!("Received execute job from `{client_peer_id}`.");
+                                    //     let elf_kind = match execute_details.elf_kind {
+                                    //         protocol::ELFKind::Subblock => zkvm::ELFKind::Subblock,
 
-                                            protocol::ELFKind::Agg => zkvm::ELFKind::Agg,
-                                        };
-                                        let mut job = Job::new(
-                                            compute_job.id,
-                                            client_peer_id,
-                                            zkvm::JobKind::SP1(
-                                                zkvm::SP1Op::Execute(elf_kind),
-                                                execute_details.id
-                                            )
-                                        );
-                                        let mut get_blob_info_list = Vec::new();
-                                        for (i, input_blob) in execute_details.batch.iter().enumerate() {
-                                            match input_blob {
-                                                InputBlob::Blob(b) => {
-                                                    warn!("Input blob should be of token kind but is: `{b:?}`");
-                                                    continue
-                                                },
+                                    //         protocol::ELFKind::Agg => zkvm::ELFKind::Agg,
+                                    //     };
+                                    //     let mut job = Job::new(
+                                    //         compute_job.id,
+                                    //         client_peer_id,
+                                    //         zkvm::JobKind::SP1(
+                                    //             zkvm::SP1Op::Execute(elf_kind),
+                                    //             execute_details.id
+                                    //         )
+                                    //     );
+                                    //     let mut get_blob_info_list = Vec::new();
+                                    //     for (i, input_blob) in execute_details.batch.iter().enumerate() {
+                                    //         match input_blob {
+                                    //             InputBlob::Blob(b) => {
+                                    //                 warn!("Input blob should be of token kind but is: `{b:?}`");
+                                    //                 continue
+                                    //             },
 
-                                                InputBlob::Token(hash, owner) => {
-                                                    let owner_peer_id = match PeerId::from_bytes(owner) {
-                                                        Ok(p) => p,
-
-                                                        Err(e) => {
-                                                            warn!("PeerId is invalid: {e:?}");
-                                                            continue
-                                                        }
-                                                    };
-                                                    job.add_pending_blob(
-                                                        i,
-                                                        job::Token {
-                                                            hash: *hash,
-                                                            owner: owner_peer_id.clone()
-                                                        }
-                                                    );
-                                                    get_blob_info_list.push((*hash, owner_peer_id));
-                                                }
-                                            };
-                                        }
-                                        pending_jobs.insert(execute_details.id, job);
-                                        // request blob info
-                                        for (hash, owner_peer_id) in get_blob_info_list.into_iter() {
-                                            let _req_id = swarm
-                                                .behaviour_mut()
-                                                .blob_transfer
-                                                .send_request(
-                                                    &owner_peer_id,
-                                                    blob_transfer::Request::GetInfo(hash)
-                                                );
-                                            info!(
-                                                "Requested info of blob `{}` from `{}`",
-                                                hash,
-                                                owner_peer_id
-                                            );
-                                        }
-                                    },
+                                    //             InputBlob::Token(hash, owner) => {
+                                    //                 job.add_prerequisite(i, *hash);
+                                    //                 blob_store.add_incomplete_blob(*hash);
+                                    //                 if let Some(owner_peer_id) = peer_id_from_bytes(owner) {                                                        
+                                    //                     get_blob_info_list.push((*hash, owner_peer_id));
+                                    //                 } else {
+                                    //                     warn!("Job will never run due to missing owner PeerId.");
+                                    //                     continue
+                                    //                 }
+                                    //             }
+                                    //         };
+                                    //     }
+                                    //     pending_jobs.insert(execute_details.id, job);
+                                    //     // request blob info
+                                    //     for (hash, owner_peer_id) in get_blob_info_list.into_iter() {                                            
+                                    //         let _req_id = swarm
+                                    //             .behaviour_mut()
+                                    //             .blob_transfer
+                                    //             .send_request(
+                                    //                 &owner_peer_id,
+                                    //                 blob_transfer::Request::GetInfo(hash)
+                                    //             );
+                                    //         info!(
+                                    //             "Requested info of blob(`{}`) from `{}`",
+                                    //             hash,
+                                    //             owner_peer_id
+                                    //         );
+                                    //     }
+                                    // },
 
                                     protocol::SP1Op::ProveCompressed(prove_compressed_details) => {
                                         info!("Received ProveCompress job from `{client_peer_id}`.");
@@ -604,6 +597,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                 prove_compressed_details.id
                                             )
                                         );
+                                        //@ check if I have the proof already
                                         let mut get_blob_info_list = Vec::new();
                                         for (i, input_blob) in prove_compressed_details.batch.iter().enumerate() {
                                             match input_blob {
@@ -613,22 +607,18 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                 },
 
                                                 InputBlob::Token(hash, owner) => {
-                                                    let owner_peer_id = match PeerId::from_bytes(owner) {
-                                                        Ok(p) => p,
-
-                                                        Err(e) => {
-                                                            warn!("PeerId is invalid: {e:?}");
+                                                    job.add_prerequisite(i, *hash);
+                                                    if blob_store.is_blob_complete(*hash) {
+                                                        job.set_prerequisite_as_fulfilled(*hash);
+                                                    } else {
+                                                        blob_store.add_incomplete_blob(*hash);
+                                                        if let Some(owner_peer_id) = peer_id_from_bytes(owner) {                                                        
+                                                            get_blob_info_list.push((*hash, owner_peer_id));
+                                                        } else {
+                                                            warn!("Job will never run due to missing owner PeerId.");
                                                             continue
                                                         }
-                                                    };
-                                                    job.add_pending_blob(
-                                                        i,
-                                                        job::Token {
-                                                            hash: *hash,
-                                                            owner: owner_peer_id.clone()
-                                                        }
-                                                    );
-                                                    get_blob_info_list.push((*hash, owner_peer_id));
+                                                    }
                                                 }
                                             };
                                         }
@@ -643,7 +633,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                     blob_transfer::Request::GetInfo(hash)
                                                 );
                                             info!(
-                                                "Requested info of blob `{}` from `{}`",
+                                                "Requested info of blob(`{}`) from `{}`",
                                                 hash,
                                                 owner_peer_id
                                             );
@@ -651,107 +641,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     },
                                 }
                             };                            
-                        }
-                    }
-                },
-
-                // responses
-                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
-                    peer: peer_id,
-                    message: request_response::Message::Response {
-                        response,
-                        //response_id,
-                        ..
-                    }
-                })) => {                
-                    match response {
-                        blob_transfer::Response::Info(blob_info) => {
-                            if let Some(job) = pending_jobs
-                                .values_mut()
-                                .find(|j| j.has_blob(&blob_info.hash))
-                            {                                
-                                job.add_blob_info(&blob_info.hash, blob_info.num_chunks);
-                                // request first chunk
-                                let _req_id = swarm
-                                    .behaviour_mut()
-                                    .blob_transfer
-                                    .send_request(
-                                        &peer_id,
-                                        blob_transfer::Request::GetChunk(blob_info.hash, 0)
-                                    );
-                                info!(
-                                    "Requested the first chunk of the blob `{}` from `{}`",
-                                    blob_info.hash,
-                                    peer_id
-                                );                                
-                            } else {
-                                warn!("Received unsolicited blob info: `{blob_info:?}`");
-                            }
-                        },
-
-                        blob_transfer::Response::Chunk(blob_chunk) => {
-                            let mut ready_job = None;
-                            if let Some(job) = pending_jobs
-                                .values_mut()
-                                .find(|j| j.has_blob(&blob_chunk.blob_hash))
-                            {             
-                                // info!("chunk {}: {}", blob_chunk.index, blob_chunk.data.len());
-                                //@ assumed owner === chunk sender
-                                job.add_blob_chunk(
-                                    blob_chunk.blob_hash,
-                                    blob_chunk.index,
-                                    blob_chunk.data,
-                                    blob_chunk.chunk_hash
-                                );
-                                if job.is_ready() {
-                                    let execute_id = match job.kind {
-                                        zkvm::JobKind::SP1(_, id) => id,
-
-                                        _ => {
-                                            warn!("Blob is not of execute kind.");
-                                            continue
-                                        }
-                                    };
-                                    ready_job = Some(execute_id);
-                                } else {
-                                    // request next chunk
-                                    let next_chunk_index = job.get_next_blob_chunk_index(&blob_chunk.blob_hash);
-                                    let _req_id = swarm
-                                        .behaviour_mut()
-                                        .blob_transfer
-                                        .send_request(
-                                            &peer_id,
-                                            blob_transfer::Request::GetChunk(blob_chunk.blob_hash, next_chunk_index)
-                                        );
-                                    // info!(
-                                    //     "Requested next chunk({}) of the blob `{}` from `{}`",
-                                    //     next_chunk_index,
-                                    //     blob_chunk.blob_hash,
-                                    //     peer_id
-                                    // );
-                                }
-                            } else {
-                                warn!("Ignored unsolicited blob chunk for `{}`", blob_chunk.blob_hash);
-                                warn!("{:?}", pending_jobs.keys());
-                                continue
-                            }
-                            // run it
-                            if let Some(id) = ready_job {
-                                ready_jobs.push_back(pending_jobs.remove(&id).unwrap());
-                                info!("Job's prerequisites are fullfilled and is ready to run.");
-                                if active_job.is_none() {
-                                    // prove it
-                                    if let Some(job) = ready_jobs.pop_front() {
-                                        run_futures.push(
-                                            spawn_run(
-                                                job.get_inputs(),
-                                                job.kind.clone()
-                                            )
-                                        );
-                                        active_job = Some(job);
-                                    }
-                                }
-                            }
                         }
                     }
                 },
@@ -768,7 +657,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 })) => {                
                     match request {
                         blob_transfer::Request::GetInfo(hash) => {
-                            if let Some(num_chunks) = pipeline.get_blob_info(hash) {                                
+                            if let Some(num_chunks) = blob_store.get_blob_info(hash) {                                
                                 if let Err(e) = swarm
                                     .behaviour_mut()
                                     .blob_transfer
@@ -786,11 +675,10 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         },
 
                         blob_transfer::Request::GetChunk(blob_hash, req_chunk_index) => {
-                            if let Some((data, chunk_hash)) = pipeline.get_blob_chunk(
+                            if let Some((data, chunk_hash)) = blob_store.get_chunk(
                                 blob_hash, 
                                 req_chunk_index
                             ) {
-                                // info!("chunk {req_chunk_index}: {}", data.len());
                                 if let Err(e) = swarm
                                     .behaviour_mut()
                                     .blob_transfer
@@ -813,6 +701,117 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     }
                 },
 
+                // blob transfer responses
+                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
+                    peer: peer_id,
+                    message: request_response::Message::Response {
+                        response,
+                        //response_id,
+                        ..
+                    }
+                })) => {                
+                    match response {
+                        blob_transfer::Response::Info(blob_info) => {
+                            if pending_jobs
+                                .values_mut()
+                                .any(|j| j.is_a_prerequisite(blob_info.hash))
+                            {    
+                                blob_store.add_blob_info(blob_info.hash, blob_info.num_chunks);
+                                //@ check if the blob is incomplete
+                                // request first chunk
+                                let _req_id = swarm
+                                    .behaviour_mut()
+                                    .blob_transfer
+                                    .send_request(
+                                        &peer_id,
+                                        blob_transfer::Request::GetChunk(blob_info.hash, 0)
+                                    );
+                                info!(
+                                    "Requested the first chunk of the blob(`{}`) from `{}`",
+                                    blob_info.hash,
+                                    peer_id
+                                );                                
+                            } else {
+                                warn!("Received unsolicited blob info: `{blob_info:?}`");
+                            }
+                        },
+
+                        blob_transfer::Response::Chunk(blob_chunk) => {
+                            let mut ready_job = None;
+                            if let Some(job) = pending_jobs
+                                .values_mut()
+                                .find(|j| j.is_a_prerequisite(blob_chunk.blob_hash))
+                            {
+                                //@ assumed owner === chunk sender
+                                blob_store.add_blob_chunk(
+                                    blob_chunk.blob_hash,
+                                    blob_chunk.index,
+                                    blob_chunk.data,
+                                    blob_chunk.chunk_hash
+                                );
+                                if blob_store.is_blob_complete(blob_chunk.blob_hash) {
+                                    job.set_prerequisite_as_fulfilled(blob_chunk.blob_hash);
+                                }
+                                if job.is_ready() {
+                                    let prove_id = match job.kind {
+                                        zkvm::JobKind::SP1(_, id) => id,
+
+                                        _ => {
+                                            warn!("Blob is not of execute kind.");
+                                            continue
+                                        }
+                                    };
+                                    ready_job = Some(prove_id);
+                                } else {
+                                    // request next chunk
+                                    if let Some(next_chunk_index) = blob_store.get_next_blob_chunk_index(blob_chunk.blob_hash) {
+                                        let _req_id = swarm
+                                            .behaviour_mut()
+                                            .blob_transfer
+                                            .send_request(
+                                                &peer_id,
+                                                blob_transfer::Request::GetChunk(blob_chunk.blob_hash, next_chunk_index)
+                                            );
+                                    }
+                                    // info!(
+                                    //     "Requested next chunk({}) of the blob `{}` from `{}`",
+                                    //     next_chunk_index,
+                                    //     blob_chunk.blob_hash,
+                                    //     peer_id
+                                    // );
+                                }
+                            } else {
+                                warn!("Ignored unsolicited blob chunk for `{}`", blob_chunk.blob_hash);
+                                continue
+                            }
+                            // run it
+                            if let Some(id) = ready_job {
+                                ready_jobs.push_back(pending_jobs.remove(&id).unwrap());
+                                info!("Job's prerequisites are fullfilled and is ready to run.");
+                                if active_job.is_none() {
+                                    // run it
+                                    if let Some(job) = ready_jobs.pop_front() {
+                                        let mut inputs = Vec::new();
+                                        for blob_hash in job.prerequisites().iter() {
+                                            if let Some(blob) = blob_store.get_blob(*blob_hash) {
+                                                inputs.push(blob);
+                                            } else {
+                                                warn!("Input is not available, job cannot start.");
+                                            }
+                                        }                                            
+                                        run_futures.push(
+                                            spawn_run(
+                                                inputs,
+                                                job.kind.clone()
+                                            )
+                                        );
+                                        active_job = Some(job);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
 
                 _ => {
                     // println!("{:#?}", event)
@@ -829,54 +828,56 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 match job.kind {
                     zkvm::JobKind::SP1(ref op, sub_id) => {
                         match op {
-                            zkvm::SP1Op::Execute(elf_kind) => {
-                                match elf_kind {
-                                    zkvm::ELFKind::Subblock => {
-                                        info!(
-                                            "Subblock(`{}`) execution is finished for `{}`",
-                                            sub_id,
-                                            job.id
-                                        );
-                                        let public_values = res.unwrap();
-                                        let hash = xxh3_128(&public_values);
-                                        let _req_id = swarm
-                                            .behaviour_mut()
-                                            .req_resp
-                                            .send_request(
-                                                &job.owner,
-                                                protocol::Request::ProofIsReady(
-                                                    ProofToken {
-                                                        job_id: job.id,
-                                                        kind: protocol::ProofKind::SP1ExecuteSubblock(job.get_batch_id()),
-                                                        hash: hash
-                                                    }
-                                                )
-                                            );
-                                    },
+                            zkvm::SP1Op::Execute(_elf_kind) => {
+                                // match elf_kind {
+                                //     zkvm::ELFKind::Subblock => {
+                                //         info!(
+                                //             "Subblock(`{}`) execution is finished for `{}`",
+                                //             sub_id,
+                                //             job.id
+                                //         );
+                                //         let public_values = res.unwrap();
+                                //         let hash = xxh3_128(&public_values);
+                                //         let _req_id = swarm
+                                //             .behaviour_mut()
+                                //             .req_resp
+                                //             .send_request(
+                                //                 &job.owner,
+                                //                 protocol::Request::ProofIsReady(
+                                //                     ProofToken {
+                                //                         job_id: job.id,
+                                //                         kind: protocol::ProofKind::SP1ExecuteSubblock(job.get_batch_id()),
+                                //                         hash: hash
+                                //                     }
+                                //                 )
+                                //             );
+                                //         blob_store.store(public_values);
+                                //     },
 
-                                    zkvm::ELFKind::Agg => {
-                                        info!(
-                                            "Agg(`{}`) execution is finished for `{}`",
-                                            sub_id,
-                                            job.id
-                                        );
-                                        let public_values = res.unwrap();
-                                        let hash = xxh3_128(&public_values);
-                                        let _req_id = swarm
-                                            .behaviour_mut()
-                                            .req_resp
-                                            .send_request(
-                                                &job.owner,
-                                                protocol::Request::ProofIsReady(
-                                                    ProofToken {
-                                                        job_id: job.id,
-                                                        kind: protocol::ProofKind::SP1ExecuteAgg(job.get_batch_id()),
-                                                        hash: hash
-                                                    }
-                                                )
-                                            );
-                                    },
-                                }
+                                //     zkvm::ELFKind::Agg => {
+                                //         info!(
+                                //             "Agg(`{}`) execution is finished for `{}`",
+                                //             sub_id,
+                                //             job.id
+                                //         );
+                                //         let public_values = res.unwrap();
+                                //         let hash = xxh3_128(&public_values);
+                                //         let _req_id = swarm
+                                //             .behaviour_mut()
+                                //             .req_resp
+                                //             .send_request(
+                                //                 &job.owner,
+                                //                 protocol::Request::ProofIsReady(
+                                //                     ProofToken {
+                                //                         job_id: job.id,
+                                //                         kind: protocol::ProofKind::SP1ExecuteAgg(job.get_batch_id()),
+                                //                         hash: hash
+                                //                     }
+                                //                 )
+                                //             );
+                                //         blob_store.store(public_values);
+                                //     },
+                                // }
                             },
 
                             zkvm::SP1Op::ProveCompressed(elf_kind) => {
@@ -902,6 +903,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                     }
                                                 )
                                             );
+                                        blob_store.store(proof);
                                     },
 
                                     zkvm::ELFKind::Agg => {
@@ -925,6 +927,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                                     }
                                                 )
                                             );
+                                        blob_store.store(proof);
                                     },
                                 }
                             },
@@ -932,73 +935,21 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     },
 
                     zkvm::JobKind::R0(_op, _sub_id) => {},
-                }
-
-                // let (_batch_id, proof_kind, db_prove_kind) = match job.kind {
-                //     zkvm::JobKind::R0(r0_op, bid) => match r0_op {
-                //         zkvm::R0Op::Segment => {
-                //             info!("Segment aggregate `{}` is proved for `{}`", bid, job.id);
-                //             (
-                //                 bid,
-                //                 ProofKind::Aggregate(bid),
-                //                 db::ProveKind::Segment(bid.to_string())
-                //             )
-                //         },
-
-                //         zkvm::R0Op::Join => {
-                //             info!("Join aggregate `{}` is proved for `{}`", bid, job.id);
-                //             (
-                //                 bid,
-                //                 ProofKind::Aggregate(bid),
-                //                 db::ProveKind::Join(bid.to_string())
-                //             )
-                //         },
-
-                //         zkvm::R0Op::Keccak => {
-                //             info!("Keccak aggregate `{}` is proved for `{}`", bid, job.id);
-                //             (
-                //                 bid,
-                //                 ProofKind::Assumption(bid),
-                //                 db::ProveKind::Assumption(bid.to_string())
-                //             )
-                //         },
-
-                //         zkvm::R0Op::Union => {
-                //             info!("Union aggregate `{}` is proved for `{}`", bid, job.id);
-                //             (
-                //                 bid,
-                //                 ProofKind::Assumption(bid),
-                //                 db::ProveKind::Assumption(bid.to_string())
-                //             )
-                //         },
-
-                //         zkvm::R0Op::Groth16 => {
-                //             info!("Groth16 extraction `{}` is finished for `{}`", bid, job.id);
-                //             (
-                //                 bid,
-                //                 ProofKind::Groth16(bid, proof_blob.clone()),
-                //                 db::ProveKind::Assumption(bid.to_string())
-                //             )
-                //         },
-                //     },
-
-                //     zkvm::JobKind::SP1(sp1_op, bid) => match sp1_op {
-                //         zkvm::SP1Op::Execute(_elf_kind) => {
-                //             info!("Execution suceeded for `{bid}`!");
-                //             (
-                //                 bid,
-                //                 ProofKind::Aggregate(bid),
-                //                 db::ProveKind::Segment(bid.to_string())
-                //             )
-                //         }
-                //     },
-                // };                
+                }                 
                 
                 // start a new prove
                 if let Some(job) = ready_jobs.pop_front() {
+                    let mut inputs = Vec::new();
+                    for blob_hash in job.prerequisites().iter() {
+                        if let Some(blob) = blob_store.get_blob(*blob_hash) {
+                            inputs.push(blob);
+                        } else {
+                            warn!("Input is not available, job cannot start.");
+                        }
+                    }     
                     run_futures.push(
                         spawn_run(
-                            job.get_inputs(),
+                            inputs,
                             job.kind.clone()
                         )
                     );
@@ -1056,21 +1007,32 @@ async fn spawn_run(
 }
 
 // look up proof in the db
-async fn lookup_proof(
-    col_proofs: &mongodb::Collection<db::Proof>,
-    hash: u128
-) -> anyhow::Result<Vec<u8>> {
-    if let Some(proof) = col_proofs.find(
-        doc! {
-            "hash": hash.to_string()
+// async fn lookup_proof(
+//     col_proofs: &mongodb::Collection<db::Proof>,
+//     hash: u128
+// ) -> anyhow::Result<Vec<u8>> {
+//     if let Some(proof) = col_proofs.find(
+//         doc! {
+//             "hash": hash.to_string()
+//         }
+//     )
+//     .await?
+//     .try_next()
+//     .await?
+//     {
+//         Ok(proof.blob)
+//     } else {
+//         Err(anyhow::Error::msg("Blob not found."))
+//     }    
+// }
+
+fn peer_id_from_bytes(b: &Vec<u8>) -> Option<PeerId> {
+    match PeerId::from_bytes(b) {
+        Ok(p) => Some(p),
+
+        Err(e) => {
+            warn!("PeerId is invalid: {e:?}");
+            None
         }
-    )
-    .await?
-    .try_next()
-    .await?
-    {
-        Ok(proof.blob)
-    } else {
-        Err(anyhow::Error::msg("Blob not found."))
-    }    
+    }
 }

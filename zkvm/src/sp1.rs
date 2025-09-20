@@ -1,6 +1,7 @@
 use sp1_sdk::{
     include_elf, SP1Stdin,
     Prover, ProverClient,
+    SP1ProofWithPublicValues,
     SP1ProvingKey, SP1VerifyingKey, 
     HashableKey, 
 };
@@ -22,7 +23,7 @@ pub fn execute_elf(
         .deferred_proof_verification(false)
         .run()
         .unwrap();
-    info!("Subblock instruction count: {}", report.total_instruction_count());
+    info!("Execution instruction count: {}", report.total_instruction_count());
     Ok(public_values.to_vec())
 }
 
@@ -30,11 +31,11 @@ pub fn prove_compressed_subblock(
     elf_path: &str,
     stdin_blob: Vec<u8>,
 ) -> anyhow::Result<Vec<u8>> {    
-    info!("Proving Subblock ELF...");
+    info!("Proving Subblock ELF...");    
     let client = ProverClient::builder().cpu().build();
     let stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;    
     let elf = fs::read(elf_path)?;
-    let (pk, vk) = client.setup(&elf);
+    let (pk, _vk) = client.setup(&elf);
     let proof = client
         .prove(&pk, &stdin)
         .deferred_proof_verification(false)
@@ -46,12 +47,19 @@ pub fn prove_compressed_subblock(
 pub fn prove_compressed_agg(
     elf_path: &str,
     stdin_blob: Vec<u8>,
+    subblock_proofs: Vec<Vec<u8>>,
 ) -> anyhow::Result<Vec<u8>> {    
     info!("Proving Agg ELF...");
-    let client = ProverClient::builder().cpu().build();
-    let stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;    
     let elf = fs::read(elf_path)?;
+    let client = ProverClient::builder().cpu().build();
     let (pk, vk) = client.setup(&elf);
+    let mut stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;
+    for proof_blob in subblock_proofs.into_iter() {
+        let proof: SP1ProofWithPublicValues = bincode::deserialize(&proof_blob)?;
+        let reduced_proof = proof.proof.try_as_compressed()
+            .ok_or_else(|| anyhow::anyhow!("Proof is not reduced."))?;
+        stdin.write_proof(*reduced_proof.clone(), reduced_proof.vk);
+    }
     let proof = client
         .prove(&pk, &stdin)
         .compressed()

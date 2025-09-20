@@ -29,3 +29,5 @@ tokio-stream.workspace = true
 zkvm = {path = "../zkvm"}
 
 peyk.workspace = true
+anbar.workspace = true
+
