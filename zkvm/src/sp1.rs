@@ -51,16 +51,17 @@ pub fn prove_compressed_agg(
     info!("Proving Agg ELF...");
     let elf = fs::read(elf_path)?;
     let client = ProverClient::builder().cuda().build();
-    let (pk, vk) = client.setup(&elf);
+    let (agg_pk, _agg_vk) = client.setup(&elf);
+    let subblock_vk = bincode::deserialize::<SP1VerifyingKey>(&fs::read("./elfs/subblock_vk.bin")?)?;
     let mut stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;
     for proof_blob in subblock_proofs.into_iter() {
         let proof: SP1ProofWithPublicValues = bincode::deserialize(&proof_blob)?;
         let reduced_proof = proof.proof.try_as_compressed()
             .ok_or_else(|| anyhow::anyhow!("Proof is not reduced."))?;
-        stdin.write_proof(*reduced_proof.clone(), reduced_proof.vk);
+        stdin.write_proof(*reduced_proof, subblock_vk.clone().vk);
     }
     let proof = client
-        .prove(&pk, &stdin)
+        .prove(&agg_pk, &stdin)
         .compressed()
         .run()?;
     Ok(bincode::serialize(&proof)?)
