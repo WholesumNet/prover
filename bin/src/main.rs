@@ -17,17 +17,21 @@ use std::{
     },
     future::IntoFuture,
     thread,
-    sync::mpsc
+    sync::{
+        mpsc,
+        Arc,
+    },
 };
 
-use tokio::time::{
+use tokio::{
+    time::{
     self, interval
+    },
 };
 use tokio_stream::wrappers::IntervalStream;
 
 use env_logger::Env;
 use log::{info, warn};
-// use chrono::{DateTime, Utc};
 
 use clap::Parser;
 use xxhash_rust::xxh3::xxh3_128;
@@ -107,6 +111,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     let mut active_job = None;
     let mut ready_jobs = VecDeque::new();
     let mut pending_jobs = HashMap::new();
+
+    let sp1_handle = Arc::new(zkvm::SP1Handle::new()?);
 
     // pull jobs to completion
     let mut run_futures = FuturesUnordered::new();
@@ -584,18 +590,15 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
                                     protocol::SP1Op::ProveCompressed(prove_compressed_details) => {
                                         info!("Received ProveCompress job from `{client_peer_id}`.");
-                                        let elf_kind = match prove_compressed_details.elf_kind {
-                                            protocol::ELFKind::Subblock => zkvm::ELFKind::Subblock,
+                                        let op = match prove_compressed_details.elf_kind {
+                                            protocol::ELFKind::Subblock => zkvm::SP1Op::ProveSubblock,
 
-                                            protocol::ELFKind::Agg => zkvm::ELFKind::Agg,
+                                            protocol::ELFKind::Agg => zkvm::SP1Op::ProveAgg,
                                         };
                                         let mut job = Job::new(
                                             compute_job.id,
                                             client_peer_id,
-                                            zkvm::JobKind::SP1(
-                                                zkvm::SP1Op::ProveCompressed(elf_kind),
-                                                prove_compressed_details.id
-                                            )
+                                            zkvm::JobKind::SP1(op, prove_compressed_details.id)
                                         );
                                         //@ check if I have the proof already
                                         let mut get_blob_info_list = Vec::new();
@@ -801,10 +804,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         }                                            
                                         run_futures.push(
                                             spawn_run(
+                                                Arc::clone(&sp1_handle),
                                                 inputs,
                                                 job.kind.clone()
                                             )
-                                        );
+                                        );                                        
                                         active_job = Some(job);
                                     }
                                 }
@@ -818,119 +822,62 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 },
             },
 
-            res = run_futures.select_next_some() => {
-                if let Err(e) = res {
+            result = run_futures.select_next_some() => {                
+                if let Err(e) = result {
                     let job: Job = active_job.take().unwrap();
-                    warn!("Failed to run job `{}`: `{:?}`", job.id, e);
+                    warn!("Failed to run job(`{}`): `{:?}`", job.id, e);
                     continue
                 }
+                let proof = result.unwrap();
                 let job = active_job.take().unwrap();
                 match job.kind {
                     zkvm::JobKind::SP1(ref op, sub_id) => {
-                        match op {
-                            zkvm::SP1Op::Execute(_elf_kind) => {
-                                // match elf_kind {
-                                //     zkvm::ELFKind::Subblock => {
-                                //         info!(
-                                //             "Subblock(`{}`) execution is finished for `{}`",
-                                //             sub_id,
-                                //             job.id
-                                //         );
-                                //         let public_values = res.unwrap();
-                                //         let hash = xxh3_128(&public_values);
-                                //         let _req_id = swarm
-                                //             .behaviour_mut()
-                                //             .req_resp
-                                //             .send_request(
-                                //                 &job.owner,
-                                //                 protocol::Request::ProofIsReady(
-                                //                     ProofToken {
-                                //                         job_id: job.id,
-                                //                         kind: protocol::ProofKind::SP1ExecuteSubblock(job.get_batch_id()),
-                                //                         hash: hash
-                                //                     }
-                                //                 )
-                                //             );
-                                //         blob_store.store(public_values);
-                                //     },
-
-                                //     zkvm::ELFKind::Agg => {
-                                //         info!(
-                                //             "Agg(`{}`) execution is finished for `{}`",
-                                //             sub_id,
-                                //             job.id
-                                //         );
-                                //         let public_values = res.unwrap();
-                                //         let hash = xxh3_128(&public_values);
-                                //         let _req_id = swarm
-                                //             .behaviour_mut()
-                                //             .req_resp
-                                //             .send_request(
-                                //                 &job.owner,
-                                //                 protocol::Request::ProofIsReady(
-                                //                     ProofToken {
-                                //                         job_id: job.id,
-                                //                         kind: protocol::ProofKind::SP1ExecuteAgg(job.get_batch_id()),
-                                //                         hash: hash
-                                //                     }
-                                //                 )
-                                //             );
-                                //         blob_store.store(public_values);
-                                //     },
-                                // }
+                        match op {                            
+                            zkvm::SP1Op::ProveSubblock => {
+                                info!(
+                                    "Subblock(`{}`) prove is finished for `{}`",
+                                    sub_id,
+                                    job.id
+                                );
+                                let hash = xxh3_128(&proof);
+                                let _req_id = swarm
+                                    .behaviour_mut()
+                                    .req_resp
+                                    .send_request(
+                                        &job.owner,
+                                        protocol::Request::ProofIsReady(
+                                            ProofToken {
+                                                job_id: job.id,
+                                                kind: protocol::ProofKind::SP1ProveCompressedSubblock(job.get_batch_id()),
+                                                hash: hash
+                                            }
+                                        )
+                                    );
+                                blob_store.store(proof);
                             },
 
-                            zkvm::SP1Op::ProveCompressed(elf_kind) => {
-                                match elf_kind {
-                                    zkvm::ELFKind::Subblock => {
-                                        info!(
-                                            "Subblock(`{}`) prove is finished for `{}`",
-                                            sub_id,
-                                            job.id
-                                        );
-                                        let proof = res.unwrap();
-                                        let hash = xxh3_128(&proof);
-                                        let _req_id = swarm
-                                            .behaviour_mut()
-                                            .req_resp
-                                            .send_request(
-                                                &job.owner,
-                                                protocol::Request::ProofIsReady(
-                                                    ProofToken {
-                                                        job_id: job.id,
-                                                        kind: protocol::ProofKind::SP1ProveCompressedSubblock(job.get_batch_id()),
-                                                        hash: hash
-                                                    }
-                                                )
-                                            );
-                                        blob_store.store(proof);
-                                    },
-
-                                    zkvm::ELFKind::Agg => {
-                                        info!(
-                                            "Agg(`{}`) prove is finished for `{}`",
-                                            sub_id,
-                                            job.id
-                                        );
-                                        let proof = res.unwrap();
-                                        let hash = xxh3_128(&proof);
-                                        let _req_id = swarm
-                                            .behaviour_mut()
-                                            .req_resp
-                                            .send_request(
-                                                &job.owner,
-                                                protocol::Request::ProofIsReady(
-                                                    ProofToken {
-                                                        job_id: job.id,
-                                                        kind: protocol::ProofKind::SP1ProveCompressedAgg(job.get_batch_id()),
-                                                        hash: hash
-                                                    }
-                                                )
-                                            );
-                                        blob_store.store(proof);
-                                    },
-                                }
-                            },
+                            zkvm::SP1Op::ProveAgg => {
+                                info!(
+                                    "Agg(`{}`) prove is finished for `{}`",
+                                    sub_id,
+                                    job.id
+                                );
+                                let hash = xxh3_128(&proof);
+                                let _req_id = swarm
+                                    .behaviour_mut()
+                                    .req_resp
+                                    .send_request(
+                                        &job.owner,
+                                        protocol::Request::ProofIsReady(
+                                            ProofToken {
+                                                job_id: job.id,
+                                                kind: protocol::ProofKind::SP1ProveCompressedAgg(job.get_batch_id()),
+                                                hash: hash
+                                            }
+                                        )
+                                    );
+                                blob_store.store(proof);
+                            }
                         };
                     },
 
@@ -949,10 +896,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     }     
                     run_futures.push(
                         spawn_run(
+                            Arc::clone(&sp1_handle),
                             inputs,
                             job.kind.clone()
                         )
-                    );
+                    );                    
                     active_job = Some(job);
                 }
             },            
@@ -982,25 +930,52 @@ async fn mongodb_setup(
         .database("admin")
         .run_command(doc! { "ping": 1 })
         .await?;
-    info!("Successfully connected to the MongoDB instance!");
+    info!("Successfully connected to the MongoDB instance.");
     Ok(client)
 }
 
 async fn spawn_run(
-    input_blobs: Vec<Vec<u8>>,
+    sp1_handle: Arc<zkvm::SP1Handle>,
+    inputs: Vec<Vec<u8>>,
     kind: zkvm::JobKind
 ) -> anyhow::Result<Vec<u8>>{
     let (tx, rx) = mpsc::channel();   
-    let handle = thread::spawn(move || 
-        if let Err(e) = tx.send(zkvm::run(input_blobs, kind)) {
-            warn!("Failed to share the prove result with the main thread: `{e:?}`");
+    let handle = thread::spawn(move || { 
+            let r = match kind {
+                zkvm::JobKind::R0(ref _op, _batch_id) => {
+                    todo!("Unreachable")
+                },
+
+                zkvm::JobKind::SP1(ref op, _batch_id) => {
+                    match op {
+                        zkvm::SP1Op::ProveSubblock => {
+                            let sp1_handle = Arc::clone(&sp1_handle);
+                            let stdin = inputs.into_iter().next().unwrap();                            
+                            sp1_handle.prove_subblock(stdin)                            
+                        },
+
+                        zkvm::SP1Op::ProveAgg => {
+                            let mut iter = inputs.into_iter();
+                            let stdin = iter.next().unwrap();
+                            let subblock_proofs = iter.collect();
+                            sp1_handle.prove_agg(
+                                stdin,
+                                subblock_proofs,
+                            )
+                        },
+                    }
+                }
+            };
+            if let Err(e) = tx.send(r) {
+                warn!("Failed to share the prove result with the main thread: `{e:?}`");
+            }
         }
     );
     loop {
         if handle.is_finished() {
             break 
         }
-        time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(50)).await;
     }
     let _ = handle.join();
     rx.recv()?
