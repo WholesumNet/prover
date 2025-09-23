@@ -65,7 +65,7 @@ impl SP1Handle {
             subblock_pk: subblock_pk,
             subblock_vk: subblock_vk,
             agg_pk: agg_pk,
-            agg_vk
+            agg_vk: agg_vk
         })
     }
 
