@@ -1,4 +1,7 @@
-use std::fs;
+use std::{
+    fs,
+    time::Instant,
+};
 use log::info;
 use anyhow;
 use bincode;
@@ -43,7 +46,8 @@ pub struct SP1Handle {
     subblock_pk: SP1ProvingKey,
     subblock_vk: SP1VerifyingKey,
     
-    agg_pk: SP1ProvingKey
+    agg_pk: SP1ProvingKey,
+    agg_vk: SP1VerifyingKey,
 }
 
 impl SP1Handle {
@@ -54,13 +58,14 @@ impl SP1Handle {
         let (subblock_pk, subblock_vk) = cuda_client.setup(&subblock_elf);
         // agg
         let agg_elf = fs::read("./elfs/agg_elf.bin")?;
-        let (agg_pk, _agg_vk) = cuda_client.setup(&agg_elf);
+        let (agg_pk, agg_vk) = cuda_client.setup(&agg_elf);
 
         Ok(Self {
             client: cuda_client,
             subblock_pk: subblock_pk,
             subblock_vk: subblock_vk,
-            agg_pk: agg_pk
+            agg_pk: agg_pk,
+            agg_vk
         })
     }
 
@@ -69,11 +74,14 @@ impl SP1Handle {
         stdin_blob: Vec<u8>,
     ) -> anyhow::Result<Vec<u8>> {    
         info!("Proving Subblock ELF...");
+        let start = Instant::now();
         let stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;    
         let proof = self.client
             .prove(&self.subblock_pk, &stdin)
             .compressed()
             .run()?;
+        let dur = start.elapsed();
+        info!("Subblock proof generation took `{:.3}s`", dur.as_secs_f64());
         Ok(bincode::serialize(&proof)?)
     }
 
@@ -82,7 +90,8 @@ impl SP1Handle {
         stdin_blob: Vec<u8>,
         subblock_proofs: Vec<Vec<u8>>,
     ) -> anyhow::Result<Vec<u8>> {    
-        info!("Proving Agg ELF...");
+        info!("Proving the Agg ELF...");
+        let start = Instant::now();
         let mut stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;
         for proof_blob in subblock_proofs.into_iter() {
             let proof: SP1ProofWithPublicValues = bincode::deserialize(&proof_blob)?;
@@ -94,8 +103,13 @@ impl SP1Handle {
             .prove(&self.agg_pk, &stdin)
             .compressed()
             .run()?;
+        let dur = start.elapsed();
+        info!("Agg proof generation took `{:.3}s`", dur.as_secs_f64());
+        info!("Verifying the Agg proof...");
+        self.client.verify(&proof, &self.agg_vk)?;
+        info!("Viola, verified!");
         Ok(bincode::serialize(&proof)?)
-    }    
+    }
 }
 
 // pub fn run(

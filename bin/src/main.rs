@@ -112,6 +112,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     let mut ready_jobs = VecDeque::new();
     let mut pending_jobs = HashMap::new();
 
+    info!("Initializing SP1 CUDA instance...");
     let sp1_handle = Arc::new(zkvm::SP1Handle::new()?);
 
     // pull jobs to completion
@@ -801,7 +802,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             } else {
                                                 warn!("Input is not available, job cannot start.");
                                             }
-                                        }                                            
+                                        }
+                                        info!("Starting job(`{}`)...", job.get_batch_id());
                                         run_futures.push(
                                             spawn_run(
                                                 Arc::clone(&sp1_handle),
@@ -894,6 +896,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                             warn!("Input is not available, job cannot start.");
                         }
                     }     
+                    info!("Starting job(`{}`)...", job.get_batch_id());
                     run_futures.push(
                         spawn_run(
                             Arc::clone(&sp1_handle),
