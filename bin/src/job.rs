@@ -36,8 +36,6 @@ impl Job {
 
     pub fn get_batch_id(&self) -> u128 {
         match self.kind {
-            JobKind::R0(_, batch_id) => batch_id,
-
             JobKind::SP1(_, batch_id) => batch_id
         }
     }

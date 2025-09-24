@@ -26,15 +26,12 @@ env_logger = "0.10.0"
 log = "0.4.25"
 libp2p = { version = "0.53.2", features = ["tokio", "kad", "identify", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
 libp2p-quic = { version = "0.10.2", features = ["tokio"] }
-num_enum = "0.6.1"
 clap = { version = "4.3.21", features = ["derive"] }
 uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
-home = "0.5.5"
 bincode = "1.3.3"
 anyhow = "1.0.86"
 rand = "0.8.5"
-base64 = "0.22.1"
 mongodb = "3.1.0"
 chrono = { version = "0.4.38", features = ["serde"] }
 tokio = "1.45.1"

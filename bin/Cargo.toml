@@ -12,17 +12,13 @@ env_logger.workspace = true
 log.workspace = true
 libp2p.workspace = true
 libp2p-quic.workspace = true
-num_enum.workspace = true
 clap.workspace = true
 uuid.workspace = true
 xxhash-rust.workspace = true
-home.workspace = true
 bincode.workspace = true
 anyhow.workspace = true
 rand.workspace = true
-base64.workspace = true
 mongodb.workspace = true
-chrono.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 
