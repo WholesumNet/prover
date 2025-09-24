@@ -66,7 +66,6 @@ use peyk::{
     },
     protocol::Request::{
         Would,
-        TransferBlob,
     },
     blob_transfer
 };
@@ -340,21 +339,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     }
                 })) => {                
                     match request {
-                        TransferBlob(_hash) => {
-                            // if let Ok(blob) = lookup_proof(&col_proofs, hash).await {
-                            //     let _req_id = swarm
-                            //         .behaviour_mut()
-                            //         .req_resp
-                            //         .send_response(
-                            //             channel,
-                            //             protocol::Response::BlobIsReady(blob)
-                            //         );
-                            //     info!("Requested blob `{hash}` is found and sent back.");                                    
-                            // } else {
-                            //     warn!("Requested blob `{hash}` is not available.");
-                            // }
-                        },
-
                         _ => {
                             continue
                         }                        
@@ -371,37 +355,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     }
                 })) => {                
                     match response {
-                        protocol::Response::BlobIsReady(_blob) => {
-                            // let hash = xxh3_128(&blob);
-                            // pending_jobs.retain_mut(|job| { 
-                            //     if !job.pending_blobs.contains_key(&hash) {
-                            //         return true
-                            //     }
-                            //     let index = job.pending_blobs.remove(&hash).unwrap();
-                            //     let _ = job.prerequisites.remove(&index);
-                            //     job.input_blobs.insert(index, blob.clone());
-                            //     //@ should be saved to db?
-                            //     info!("Received requested blob `{hash}` from `{client_peer_id}`");
-                            //     if job.prerequisites.is_empty() {
-                            //         info!("Job {} is ready to run.", job.id);
-                            //         ready_jobs.push_back(job.clone());
-                            //     }
-                            //     !job.prerequisites.is_empty()
-                            // });
-                            // if active_job.is_none() {
-                            //     // prove it
-                            //     if let Some(j) = ready_jobs.pop_front() {
-                            //         run_futures.push(
-                            //             spawn_run(
-                            //                 j.input_blobs.values().cloned().collect(),
-                            //                 j.kind.clone()
-                            //             )
-                            //         );
-                            //         active_job = Some(j);
-                            //     }
-                            // }
-                        },
-
                         protocol::Response::Job(compute_job) => {                            
                             match compute_job.kind {                                
                                 protocol::JobKind::SP1(sp1_op) => match sp1_op {                                    
@@ -465,17 +418,17 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         //request_id,
                         ..
                     }
-                })) => {                
+                })) => {
                     match request {
                         blob_transfer::Request::GetInfo(hash) => {
-                            if let Some(num_chunks) = blob_store.get_blob_info(hash) {                                
+                            if let Some(num_chunks) = blob_store.get_blob_info(hash) {
                                 if let Err(e) = swarm
                                     .behaviour_mut()
                                     .blob_transfer
                                         .send_response(
                                             channel,
                                             blob_transfer::Response::Info(blob_transfer::BlobInfo {
-                                                hash: hash,                                            
+                                                hash: hash,
                                                 num_chunks: num_chunks,
                                             })
                                         )
@@ -487,7 +440,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
                         blob_transfer::Request::GetChunk(blob_hash, req_chunk_index) => {
                             if let Some((data, chunk_hash)) = blob_store.get_chunk(
-                                blob_hash, 
+                                blob_hash,
                                 req_chunk_index
                             ) {
                                 if let Err(e) = swarm
