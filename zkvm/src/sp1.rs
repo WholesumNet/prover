@@ -26,10 +26,10 @@ impl SP1CudaHandle {
     pub fn new() -> anyhow::Result<Self> {
         let cuda_client = ProverClient::builder().cuda().build();
         // subblock
-        let subblock_elf = fs::read("./elfs/subblock_elf.bin")?;
+        let subblock_elf = fs::read("../elfs/subblock_elf.bin")?;
         let (subblock_pk, subblock_vk) = cuda_client.setup(&subblock_elf);
         // agg
-        let agg_elf = fs::read("./elfs/agg_elf.bin")?;
+        let agg_elf = fs::read("../elfs/agg_elf.bin")?;
         let (agg_pk, agg_vk) = cuda_client.setup(&agg_elf);
 
         Ok(Self {
