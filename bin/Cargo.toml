@@ -1,0 +1,29 @@
+[package]
+name = "prover"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+futures.workspace = true
+futures-util.workspace = true
+env_logger.workspace = true
+log.workspace = true
+libp2p.workspace = true
+libp2p-quic.workspace = true
+clap.workspace = true
+uuid.workspace = true
+xxhash-rust.workspace = true
+bincode.workspace = true
+anyhow.workspace = true
+rand.workspace = true
+mongodb.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+
+zkvm = {path = "../zkvm"}
+
+peyk.workspace = true
+anbar.workspace = true
+

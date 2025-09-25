@@ -1,0 +1,16 @@
+[package]
+name = "zkvm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+env_logger.workspace = true
+log.workspace = true
+bincode.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+
+# sp1
+sp1-sdk = { version = "4.1.7" }
+
+peyk.workspace = true
