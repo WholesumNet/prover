@@ -212,36 +212,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     .get_closest_peers(random_peer_id);
             },
 
-            _i = timer_satisfy_job_prerequisities.select_next_some() => {
-                // pending_jobs
-                //     .iter()                    
-                //     .for_each(|j: &Job| {
-                //         j.prerequisites.values()
-                //             .for_each(|token| {
-                //                 //@ move peer_id from string calculation to when job is being created
-                //                 let peer_id = match PeerId::from_bytes(&token.owner) {
-                //                     Ok(p) => p,
-
-                //                     Err(e) => {
-                //                         warn!("PeerId is invalid: {e:?}");
-                //                         return
-                //                     }
-                //                 };
-                //                 let _req_id = swarm
-                //                     .behaviour_mut()
-                //                     .req_resp
-                //                     .send_request(
-                //                         &peer_id,
-                //                         TransferBlob(token.hash)
-                //                     );
-                //                 info!(
-                //                     "Requested transfer of blob `{}` from `{}`",
-                //                     token.hash,
-                //                     peer_id
-                //                 );
-                //             });
-                //     });
-            }
+            _i = timer_satisfy_job_prerequisities.select_next_some() => {},
 
             // libp2p events
             event = swarm.select_next_some() => match event {
