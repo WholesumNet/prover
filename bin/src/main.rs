@@ -665,14 +665,14 @@ async fn spawn_run(
                         zkvm::SP1Op::ProveSubblock => {
                             let sp1_cuda_handle = Arc::clone(&sp1_cuda_handle);
                             let stdin = inputs.into_iter().next().unwrap();                            
-                            sp1_cuda_handle.prove_subblock(stdin)                            
+                            sp1_cuda_handle.prove_subblock_on_cluster(stdin)                            
                         },
 
                         zkvm::SP1Op::ProveAgg => {
                             let mut iter = inputs.into_iter();
                             let stdin = iter.next().unwrap();
                             let subblock_proofs = iter.collect();
-                            sp1_cuda_handle.prove_agg(
+                            sp1_cuda_handle.prove_aggregation_on_cluster(
                                 stdin,
                                 subblock_proofs,
                             )
