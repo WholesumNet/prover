@@ -34,7 +34,6 @@ use env_logger::Env;
 use log::{info, warn};
 
 use clap::Parser;
-use xxhash_rust::xxh3::xxh3_128;
 
 use libp2p::{
     gossipsub, mdns, request_response,
@@ -567,7 +566,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     sub_id,
                                     job.id
                                 );
-                                let hash = xxh3_128(&proof);
+                                let hash = blob_store.store(proof);                                
                                 let _req_id = swarm
                                     .behaviour_mut()
                                     .req_resp
@@ -581,7 +580,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             }
                                         )
                                     );
-                                blob_store.store(proof);
                             },
 
                             zkvm::SP1Op::ProveAgg => {
@@ -590,7 +588,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     sub_id,
                                     job.id
                                 );
-                                let hash = xxh3_128(&proof);
+                                let hash = blob_store.store(proof);
                                 let _req_id = swarm
                                     .behaviour_mut()
                                     .req_resp
@@ -604,7 +602,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             }
                                         )
                                     );
-                                blob_store.store(proof);
                             }
                         };
                     },
