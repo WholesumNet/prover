@@ -11,6 +11,6 @@ anyhow.workspace = true
 tokio.workspace = true
 
 # sp1
-sp1-sdk = { version = "5.1.2", default-features = false, features = ["cuda"] }
+sp1-sdk = { version = "5.1.2", default-features = false }
 
 peyk.workspace = true

@@ -342,7 +342,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         );
                                         //@ check if I have the proof already
                                         let mut get_blob_info_list = Vec::new();
-                                        for (i, input_token) in prove_details.batch.iter().enumerate() {
+                                        for (i, input_token) in prove_details.tokens.iter().enumerate() {
                                             job.add_prerequisite(i, input_token.hash);
                                             if blob_store.is_blob_complete(input_token.hash) {
                                                 job.set_prerequisite_as_fulfilled(input_token.hash);
