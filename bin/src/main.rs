@@ -70,7 +70,7 @@ use peyk::{
 };
 
 use zkvm::{
-    sp1::SP1CudaHandle
+    sp1::SP1Handle
 };
 use anbar;
 
@@ -105,15 +105,19 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     ); 
 
     // setup mongodb
-    let _db_client = mongodb_setup("mongodb://localhost:27017").await?;
+    // let _db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
     // maintain jobs
     let mut active_job = None;
     let mut ready_jobs = VecDeque::new();
     let mut pending_jobs = HashMap::new();
 
-    info!("Initializing SP1 CUDA instance...");
-    let sp1_cuda_handle = Arc::new(SP1CudaHandle::new()?);
+    info!("Initializing SP1.");  
+    let sp1_handle = tokio::task::spawn_blocking(|| 
+        Arc::new(SP1Handle::new().unwrap())
+    )
+    .await
+    .unwrap();
 
     // pull jobs to completion
     let mut run_futures = FuturesUnordered::new();
@@ -531,7 +535,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         info!("Starting job(`{}`)...", job.get_batch_id());
                                         run_futures.push(
                                             spawn_run(
-                                                Arc::clone(&sp1_cuda_handle),
+                                                Arc::clone(&sp1_handle),
                                                 inputs,
                                                 job.kind.clone()
                                             )
@@ -620,7 +624,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     info!("Starting job(`{}`)...", job.get_batch_id());
                     run_futures.push(
                         spawn_run(
-                            Arc::clone(&sp1_cuda_handle),
+                            Arc::clone(&sp1_handle),
                             inputs,
                             job.kind.clone()
                         )
@@ -632,25 +636,26 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     }
 }
 
-async fn mongodb_setup(
-    uri: &str,
-) -> anyhow::Result<mongodb::Client> {
-    info!("Connecting to the MongoDB daemon...");
-    let mut client_options = ClientOptions::parse(uri).await?;
-    let server_api = ServerApi::builder().version(ServerApiVersion::V1).build();
-    client_options.server_api = Some(server_api);
-    let client = mongodb::Client::with_options(client_options)?;
-    // Send a ping to confirm a successful connection
-    client
-        .database("admin")
-        .run_command(doc! { "ping": 1 })
-        .await?;
-    info!("Successfully connected to the MongoDB instance.");
-    Ok(client)
-}
+
+// async fn mongodb_setup(
+//     uri: &str,
+// ) -> anyhow::Result<mongodb::Client> {
+//     info!("Connecting to the MongoDB daemon...");
+//     let mut client_options = ClientOptions::parse(uri).await?;
+//     let server_api = ServerApi::builder().version(ServerApiVersion::V1).build();
+//     client_options.server_api = Some(server_api);
+//     let client = mongodb::Client::with_options(client_options)?;
+//     // Send a ping to confirm a successful connection
+//     client
+//         .database("admin")
+//         .run_command(doc! { "ping": 1 })
+//         .await?;
+//     info!("Successfully connected to the MongoDB instance.");
+//     Ok(client)
+// }
 
 async fn spawn_run(
-    sp1_cuda_handle: Arc<SP1CudaHandle>,
+    sp1_handle: Arc<SP1Handle>,
     inputs: Vec<Vec<u8>>,
     kind: zkvm::JobKind
 ) -> anyhow::Result<Vec<u8>>{
@@ -660,16 +665,16 @@ async fn spawn_run(
                 zkvm::JobKind::SP1(ref op, _batch_id) => {
                     match op {
                         zkvm::SP1Op::ProveSubblock => {
-                            let sp1_cuda_handle = Arc::clone(&sp1_cuda_handle);
+                            let sp1_handle = Arc::clone(&sp1_handle);
                             let stdin = inputs.into_iter().next().unwrap();                            
-                            sp1_cuda_handle.prove_subblock_on_cluster(stdin)                            
+                            sp1_handle.prove_subblock_on_cluster(stdin)                            
                         },
 
                         zkvm::SP1Op::ProveAgg => {
                             let mut iter = inputs.into_iter();
                             let stdin = iter.next().unwrap();
                             let subblock_proofs = iter.collect();
-                            sp1_cuda_handle.prove_aggregation_on_cluster(
+                            sp1_handle.prove_aggregation_on_cluster(
                                 stdin,
                                 subblock_proofs,
                             )

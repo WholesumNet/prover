@@ -13,8 +13,8 @@ use sp1_sdk::{
     SP1ProofWithPublicValues,
 };
 
-
-pub struct SP1CudaHandle {
+#[allow(unused)]
+pub struct SP1Handle {
     client: CpuProver,
     
     subblock_pk: SP1ProvingKey,
@@ -24,7 +24,7 @@ pub struct SP1CudaHandle {
     agg_vk: SP1VerifyingKey,
 }
 
-impl SP1CudaHandle {
+impl SP1Handle {
     pub fn new() -> anyhow::Result<Self> {
         let cpu_client = ProverClient::builder().cpu().build();
         // subblock
