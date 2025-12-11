@@ -42,16 +42,16 @@ use libp2p::{
     PeerId,
 };
 use anyhow;
-use mongodb::{
-    bson::{
-        doc,
-    },
-    options::{
-        ClientOptions,
-        ServerApi,
-        ServerApiVersion
-    },
-};
+// use mongodb::{
+//     bson::{
+//         doc,
+//     },
+//     options::{
+//         ClientOptions,
+//         ServerApi,
+//         ServerApiVersion
+//     },
+// };
 
 use peyk::{
     p2p::{
@@ -536,6 +536,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         run_futures.push(
                                             spawn_run(
                                                 Arc::clone(&sp1_handle),
+                                                job.get_batch_id(),
                                                 inputs,
                                                 job.kind.clone()
                                             )
@@ -625,6 +626,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     run_futures.push(
                         spawn_run(
                             Arc::clone(&sp1_handle),
+                            job.get_batch_id(),
                             inputs,
                             job.kind.clone()
                         )
@@ -656,6 +658,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
 async fn spawn_run(
     sp1_handle: Arc<SP1Handle>,
+    batch_id: u128,
     inputs: Vec<Vec<u8>>,
     kind: zkvm::JobKind
 ) -> anyhow::Result<Vec<u8>>{
@@ -667,7 +670,7 @@ async fn spawn_run(
                         zkvm::SP1Op::ProveSubblock => {
                             let sp1_handle = Arc::clone(&sp1_handle);
                             let stdin = inputs.into_iter().next().unwrap();                            
-                            sp1_handle.prove_subblock_on_cluster(stdin)                            
+                            sp1_handle.prove_subblock_on_cluster(batch_id, stdin)                            
                         },
 
                         zkvm::SP1Op::ProveAgg => {
@@ -675,6 +678,7 @@ async fn spawn_run(
                             let stdin = iter.next().unwrap();
                             let subblock_proofs = iter.collect();
                             sp1_handle.prove_aggregation_on_cluster(
+                                batch_id,
                                 stdin,
                                 subblock_proofs,
                             )

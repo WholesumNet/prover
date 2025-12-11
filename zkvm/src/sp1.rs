@@ -46,11 +46,16 @@ impl SP1Handle {
     // prove on sp1 cluster
     pub fn prove_subblock_on_cluster(
         &self,
+        batch_id: u128,
         stdin_blob: Vec<u8>,
     ) -> anyhow::Result<Vec<u8>> {            
         info!("Proving subblock is initiated.");                
         let start = Instant::now();
-        fs::write("../sp1-cluster/stdin.bin", stdin_blob)?;
+        let stdin_filename = format!(
+            "../sp1-cluster/subblock-stdin-{}.bin",
+            batch_id
+        );            
+        fs::write(&stdin_filename, &stdin_blob)?;
         let status = Command::new("../sp1-cluster/sp1-cluster-cli")
             .arg("bench")
             .arg("input")
@@ -59,7 +64,7 @@ impl SP1Handle {
             .arg("--redis-nodes")
             .arg("redis://:redispassword@localhost:6379/0")
             .arg("../elfs/subblock_elf.bin")
-            .arg("../sp1-cluster/stdin.bin")
+            .arg(stdin_filename)
             .status()?;
         if !status.success() {
             anyhow::bail!("Proving failed: {status:?}")
@@ -73,6 +78,7 @@ impl SP1Handle {
     // prove on sp1 cluster
     pub fn prove_aggregation_on_cluster(
         &self,
+        batch_id: u128,
         stdin_blob: Vec<u8>,
         subblock_proofs: Vec<Vec<u8>>,
     ) -> anyhow::Result<Vec<u8>> {    
@@ -85,7 +91,11 @@ impl SP1Handle {
                 .ok_or_else(|| anyhow::anyhow!("The input subblock proof is not of `reduced` type."))?;
             stdin.write_proof(*reduced_proof, self.subblock_vk.clone().vk);
         }
-        fs::write("../sp1-cluster/stdin.bin", &bincode::serialize(&stdin)?)?;
+        let stdin_filename = format!(
+            "../sp1-cluster/agg-stdin-{}.bin",
+            batch_id
+        );
+        fs::write(&stdin_filename, &bincode::serialize(&stdin)?)?;
         let status = Command::new("../sp1-cluster/sp1-cluster-cli")
             .arg("bench")
             .arg("input")
@@ -94,7 +104,7 @@ impl SP1Handle {
             .arg("--redis-nodes")
             .arg("redis://:redispassword@localhost:6379/0")
             .arg("../elfs/agg_elf.bin")
-            .arg("../sp1-cluster/stdin.bin")
+            .arg(stdin_filename)
             .status()?;
         if !status.success() {
             anyhow::bail!("Proving failed: {status:?}")
