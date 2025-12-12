@@ -26,7 +26,7 @@ pub struct SP1Handle {
 
 impl SP1Handle {
     pub fn new() -> anyhow::Result<Self> {
-        info!("Initializing SP1.")
+        info!("Initializing SP1.");
         let cpu_client = ProverClient::builder().cpu().build();
         // subblock
         let subblock_elf = fs::read("../elfs/subblock_elf.bin")?;
