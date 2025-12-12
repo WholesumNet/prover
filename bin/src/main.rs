@@ -557,7 +557,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             result = run_futures.select_next_some() => {                
                 if let Err(e) = result {
                     let job: Job = active_job.take().unwrap();
-                    warn!("Failed to run job(`{}`): `{:?}`", job.get_batch_id, e);
+                    warn!("Failed to run job(`{}`): `{:?}`", job.get_batch_id(), e);
                     continue
                 }
                 let proof = result.unwrap();
