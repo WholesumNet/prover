@@ -87,8 +87,8 @@ impl SP1Handle {
         let start = Instant::now();        
         let mut stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;
         for proof_blob in subblock_proofs.into_iter() {
-            fs::write("./temp-proof.bin", &proof_blob);
-            let proof = SP1ProofWithPublicValues::load(./temp-proof.bin)?;
+            fs::write("./temp-proof.bin", &proof_blob)?;
+            let proof = SP1ProofWithPublicValues::load("./temp-proof.bin")?;
             let reduced_proof = proof.proof.try_as_compressed()
                 .ok_or_else(|| anyhow::anyhow!("The input subblock proof is not of `reduced` type."))?;
             stdin.write_proof(*reduced_proof, self.subblock_vk.clone().vk);
