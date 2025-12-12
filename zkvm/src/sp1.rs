@@ -111,13 +111,13 @@ impl SP1Handle {
         if !status.success() {
             anyhow::bail!("Proving failed: {status:?}")
         }
-        let proof = fs::read("../sp1-cluster/proof.bin")?;
+        let agg_proof = SP1ProofWithPublicValues::load("../sp1-cluster/proof.bin")?;
         let dur = start.elapsed();
         info!("Proving is finished in `{:.3}s`.", dur.as_secs_f64());
         info!("Verifying the aggregation proof.");
-        let agg_proof: SP1ProofWithPublicValues = bincode::deserialize(&proof)?;
         self.client.verify(&agg_proof, &self.agg_vk)?;
         info!("Viola, verified!");
-        Ok(proof)
+        let proof_bytes = bincode::serialize(&agg_proof)?;
+        Ok(proof_bytes)
     }
 }
