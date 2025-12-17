@@ -34,7 +34,7 @@ anyhow = "1.0.86"
 rand = "0.8.5"
 mongodb = "3.1.0"
 chrono = { version = "0.4.38", features = ["serde"] }
-tokio = "1.45.1"
+tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt", rt-multi-thread"] }
 tokio-stream = "0.1.17"
 
 peyk = { path = "../peyk" }

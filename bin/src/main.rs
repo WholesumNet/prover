@@ -95,7 +95,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error + 'static>> {
+async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info"))
         .init();
     let cli = Cli::parse();
