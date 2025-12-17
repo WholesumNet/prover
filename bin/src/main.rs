@@ -9,8 +9,8 @@ use futures::{
 };
 
 use std::{
-    error::Error,
     time::Duration,
+    env,
     collections::{
         HashMap,
         VecDeque
@@ -31,7 +31,10 @@ use tokio::{
 use tokio_stream::wrappers::IntervalStream;
 
 use env_logger::Env;
-use log::{info, warn};
+use log::{
+    info,
+    warn
+};
 
 use clap::Parser;
 
@@ -41,7 +44,7 @@ use libp2p::{
     swarm::{SwarmEvent},
     PeerId,
 };
-use anyhow;
+use anyhow::Context;
 // use mongodb::{
 //     bson::{
 //         doc,
@@ -156,33 +159,42 @@ async fn main() -> anyhow::Result<()> {
         .gossipsub
         .subscribe(&topic);
 
-    // bootstrap 
-    if false == cli.dev {
-        // get to know bootnodes
-        const BOOTNODES: [&str; 1] = [
-            "TBD",
-        ];
-        for peer in &BOOTNODES {
-            swarm.behaviour_mut()
-                .kademlia
-                .add_address(&peer.parse()?, "/ip4/W.X.Y.Z/tcp/20201".parse()?);
-        }
+    // bootstrap kademlia
+    if !cli.dev {
+        let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
+            .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
+        let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
+            .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
+        // get to know bootnodes        
+        swarm.behaviour_mut()
+            .kademlia
+            .add_address(
+                &bootnode_peer_id.parse()?,
+                format!(
+                    "/ip4/{}/tcp/20201",
+                    bootnode_ip_addr
+                )
+                .parse()?
+            );
         // find myself
         if let Err(e) = 
             swarm
                 .behaviour_mut()
                 .kademlia
                 .bootstrap() {
-            warn!("Failed to bootstrap Kademlia: `{:?}`", e);
+            warn!(
+                "Failed to bootstrap Kademlia: `{:?}`",
+                e
+            );
 
         } else {
-            info!("Self-bootstraping is initiated.");
+            info!(
+                "Kademlia bootstraping is initiated. Bootnode PeerId: `{}`, IP: `{}`",
+                bootnode_peer_id,
+                bootnode_ip_addr
+            );
         }
     }
-
-    // if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
-    //     eprintln!("failed to initiate bootstrapping: {:#?}", e);
-    // }
 
     // listen on all interfaces and whatever port the os assigns
     //@ should read from the config file
@@ -192,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
     swarm.listen_on("/ip6/::/udp/20202/quic-v1".parse()?)?;
 
     let mut timer_peer_discovery = IntervalStream::new(
-        interval(Duration::from_secs(5 * 60))
+        interval(Duration::from_secs(60))
     )
     .fuse();
     // it takes ~5s for a rtx 3090 to prove 2m cycles
@@ -204,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
         select! {
             // try to discover new peers
             _i = timer_peer_discovery.select_next_some() => {
-                if true == cli.dev {
+                if !cli.dev {
                     continue;
                 }
                 let random_peer_id = PeerId::random();
@@ -262,15 +274,12 @@ async fn main() -> anyhow::Result<()> {
                         }
                     )
                 ) => {
-                    // info!("Inbound identify event `{:#?}`", info);
-                    if false == cli.dev {
+                    if !cli.dev {
+                        info!("Inbound identify event `{:#?}`", info);
                         for addr in info.listen_addrs {
-                            // if false == addr.iter().any(|item| item == &"127.0.0.1" || item == &"::1"){
-                            swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, addr);
-                            // }
+                            swarm.behaviour_mut()
+                                .kademlia
+                                .add_address(&peer_id, addr);
                         }
                     }
 
@@ -550,7 +559,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 _ => {
-                    // println!("{:#?}", event)
+                    info!("{:#?}", event)
                 },
             },
 
