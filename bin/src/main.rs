@@ -167,13 +167,18 @@ async fn main() -> anyhow::Result<()> {
         .gossipsub
         .subscribe(&topic);
 
+    let rendezvous_record = if cli.dev {
+        None
+    } else {
+        Some(kad::RecordKey::new(&b"wholesum-rendezvous"))
+    };
     // init kademlia
     if !cli.dev {
         let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
             .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
         let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
             .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
-        // get to know bootnodes        
+        // get to know bootnode(s)
         swarm.behaviour_mut()
             .kademlia
             .add_address(
@@ -184,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .parse()?
             );
+        // initiate bootstrapping
         match swarm.behaviour_mut().kademlia.bootstrap() {
             Ok(query_id) => {            
                 info!(
@@ -194,6 +200,26 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => {
                 info!(
                     "Bootstrap failed: {:?}",
+                    e
+                );
+            }
+        };
+        // put the rendezvous key on the DHT
+        match swarm.behaviour_mut()
+            .kademlia
+            .start_providing(
+                rendezvous_record.clone().unwrap()
+            )
+        {
+            Ok(query_id) => {
+                info!(
+                    "Rendezvous record is put on the DHT, query Id: {}",
+                    query_id
+                );
+            },
+            Err(e) => {
+                warn!(
+                    "Failed to put the rendezvous record on the DHT: {:?}.",
                     e
                 );
             }
@@ -216,6 +242,12 @@ async fn main() -> anyhow::Result<()> {
         interval(Duration::from_secs(5))
     )
     .fuse();
+    // to pull for new peers 
+    let mut timer_pull_rendezvous_providers = IntervalStream::new(
+        interval(Duration::from_secs(10))
+    )
+    .fuse();
+
     loop {
         select! {
             // try to discover new peers
@@ -232,6 +264,15 @@ async fn main() -> anyhow::Result<()> {
             },
 
             _i = timer_satisfy_job_prerequisities.select_next_some() => {},
+
+            // pull for new peers
+            _i = timer_pull_rendezvous_providers.select_next_some() => {
+                if !cli.dev {
+                    swarm.behaviour_mut()
+                        .kademlia
+                        .get_providers(rendezvous_record.clone().unwrap());
+                }
+            },
 
             // libp2p events
             event = swarm.select_next_some() => match event {
@@ -362,6 +403,13 @@ async fn main() -> anyhow::Result<()> {
                     ..
                 })) => {
                     warn!("Query for closest peers timed out");
+                },
+
+                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                    result: kad::QueryResult::GetProviders(Ok(ok)),
+                    ..
+                })) => {
+                    info!("providers pull: {:#?}", ok);
                 },
 
                 // requests
