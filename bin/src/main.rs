@@ -205,25 +205,25 @@ async fn main() -> anyhow::Result<()> {
             }
         };
         // put the rendezvous key on the DHT
-        match swarm.behaviour_mut()
-            .kademlia
-            .start_providing(
-                rendezvous_record.clone().unwrap()
-            )
-        {
-            Ok(query_id) => {
-                info!(
-                    "Rendezvous record is put on the DHT, query Id: {}",
-                    query_id
-                );
-            },
-            Err(e) => {
-                warn!(
-                    "Failed to put the rendezvous record on the DHT: {:?}.",
-                    e
-                );
-            }
-        };
+        // match swarm.behaviour_mut()
+        //     .kademlia
+        //     .start_providing(
+        //         rendezvous_record.clone().unwrap()
+        //     )
+        // {
+        //     Ok(query_id) => {
+        //         info!(
+        //             "Rendezvous record is put on the DHT, query Id: {}",
+        //             query_id
+        //         );
+        //     },
+        //     Err(e) => {
+        //         warn!(
+        //             "Failed to put the rendezvous record on the DHT: {:?}.",
+        //             e
+        //         );
+        //     }
+        // };
     }
     // listen on all interfaces
     swarm.listen_on(
@@ -267,11 +267,11 @@ async fn main() -> anyhow::Result<()> {
 
             // pull for new peers
             _i = timer_pull_rendezvous_providers.select_next_some() => {
-                if !cli.dev {
-                    swarm.behaviour_mut()
-                        .kademlia
-                        .get_providers(rendezvous_record.clone().unwrap());
-                }
+                // if !cli.dev {
+                //     swarm.behaviour_mut()
+                //         .kademlia
+                //         .get_providers(rendezvous_record.clone().unwrap());
+                // }
             },
 
             // libp2p events
@@ -405,12 +405,12 @@ async fn main() -> anyhow::Result<()> {
                     warn!("Query for closest peers timed out");
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
-                    result: kad::QueryResult::GetProviders(Ok(ok)),
-                    ..
-                })) => {
-                    info!("providers pull: {:#?}", ok);
-                },
+                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                //     result: kad::QueryResult::GetProviders(Ok(found_providers)),
+                //     ..
+                // })) => {
+                    
+                // },
 
                 // requests
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
