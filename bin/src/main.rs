@@ -40,7 +40,6 @@ use log::{
 use clap::Parser;
 
 use libp2p::{
-    core::ConnectedPoint,
     identity,
     identify,  
     gossipsub,
@@ -51,6 +50,7 @@ use libp2p::{
         SwarmEvent
     },
     PeerId,
+    multiaddr::Protocol,
 };
 use anyhow::Context;
 // use mongodb::{
@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
             new_key
         }
     };    
-    info!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
+    info!("My peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
 
     // Libp2p swarm 
     let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
@@ -167,11 +167,11 @@ async fn main() -> anyhow::Result<()> {
         .gossipsub
         .subscribe(&topic);
 
-    let rendezvous_record = if cli.dev {
-        None
-    } else {
-        Some(kad::RecordKey::new(&b"wholesum-rendezvous"))
-    };
+    // let rendezvous_record = if cli.dev {
+    //     None
+    // } else {
+    //     Some(kad::RecordKey::new(&b"wholesum-rendezvous"))
+    // };
     // init kademlia
     if !cli.dev {
         let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
@@ -287,24 +287,10 @@ async fn main() -> anyhow::Result<()> {
                     ..
                 } => {
                     println!(
-                        "A connection has been established to {}@{:?}",
+                        "A connection has been established to {} via {:?}",
                         peer_id,
                         endpoint
-                    );
-                    if !cli.dev {
-                        let addr = match endpoint {
-                            ConnectedPoint::Dialer { address, .. } => {
-                                address
-                            },
-
-                            ConnectedPoint::Listener { send_back_addr, .. } => {
-                                send_back_addr
-                            }
-                        };
-                        swarm.behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, addr);
-                    }
+                    );                    
                 },
 
                 // mdns events
@@ -351,14 +337,32 @@ async fn main() -> anyhow::Result<()> {
                             "Inbound identify event from {}: {:#?}`",
                             peer_id,
                             info
-                        );
-                        for addr in info.listen_addrs {
-                            swarm.behaviour_mut()
-                                .kademlia
-                                .add_address(&peer_id, addr);
-                        }
+                        );                        
                     }
+                },
 
+                SwarmEvent::NewExternalAddrOfPeer {
+                    peer_id,
+                    address
+                } => {
+                    let is_public = address.iter()
+                        .filter_map(|c| 
+                            if let Protocol::Ip4(ip4_addr) = c {
+                                Some(ip4_addr)
+                            } else {
+                                None
+                            }
+                        )
+                        .all(|a| !a.is_private() && !a.is_loopback());
+                    if is_public {                        
+                        info!(
+                            "Added public address of the peer to the DHT: {}",
+                            address
+                        );
+                        swarm.behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, address);
+                    }                      
                 },
             
                 SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -420,7 +424,8 @@ async fn main() -> anyhow::Result<()> {
                         // channel,
                         // request_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {                
                     match request {
                         _ => {
@@ -436,7 +441,8 @@ async fn main() -> anyhow::Result<()> {
                         response,
                         //response_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {                
                     match response {
                         protocol::Response::Job(compute_job) => {                            
@@ -501,7 +507,8 @@ async fn main() -> anyhow::Result<()> {
                         channel,
                         //request_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {
                     match request {
                         blob_transfer::Request::GetInfo(hash) => {
@@ -556,7 +563,8 @@ async fn main() -> anyhow::Result<()> {
                         response,
                         //response_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {                
                     match response {
                         blob_transfer::Response::Info(blob_info) => {

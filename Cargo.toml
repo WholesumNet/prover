@@ -24,7 +24,7 @@ futures = "0.3.28"
 futures-util = "0.3.29"
 env_logger = "0.10.0"
 log = "0.4.25"
-libp2p = { version = "0.53.2", features = ["tokio", "kad", "identify", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
+libp2p = { version = "0.56", features = ["tokio", "kad", "identify", "request-response", "cbor", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux"] }
 libp2p-quic = { version = "0.10.2", features = ["tokio"] }
 clap = { version = "4.3.21", features = ["derive"] }
 uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
