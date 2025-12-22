@@ -143,7 +143,8 @@ async fn main() -> anyhow::Result<()> {
     // blob store
     let mut blob_store = anbar::BlobStore::new();
     
-    // key 
+    // Libp2p swarm 
+    // peer id
     let local_key = {
         if let Some(key_file) = cli.key_file {
             let bytes = std::fs::read(key_file).unwrap();
@@ -158,27 +159,28 @@ async fn main() -> anyhow::Result<()> {
         }
     };    
     info!("My peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
-
-    // Libp2p swarm 
     let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
+    // listen on all interfaces
+    swarm.listen_on(
+        "/ip4/0.0.0.0/udp/20201/quic-v1".parse()?
+    )?;
+    swarm.listen_on(
+        "/ip4/0.0.0.0/tcp/20201".parse()?
+    )?;
+    // init gossip
     let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
     let _ = swarm
         .behaviour_mut()
         .gossipsub
         .subscribe(&topic);
-
-    // let rendezvous_record = if cli.dev {
-    //     None
-    // } else {
-    //     Some(kad::RecordKey::new(&b"wholesum-rendezvous"))
-    // };
+    
     // init kademlia
     if !cli.dev {
+        // get to know bootnode(s)
         let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
             .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
         let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
             .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
-        // get to know bootnode(s)
         swarm.behaviour_mut()
             .kademlia
             .add_address(
@@ -204,35 +206,28 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         };
-        // put the rendezvous key on the DHT
-        // match swarm.behaviour_mut()
-        //     .kademlia
-        //     .start_providing(
-        //         rendezvous_record.clone().unwrap()
-        //     )
-        // {
-        //     Ok(query_id) => {
-        //         info!(
-        //             "Rendezvous record is put on the DHT, query Id: {}",
-        //             query_id
-        //         );
-        //     },
-        //     Err(e) => {
-        //         warn!(
-        //             "Failed to put the rendezvous record on the DHT: {:?}.",
-        //             e
-        //         );
-        //     }
-        // };
-    }
-    // listen on all interfaces
-    swarm.listen_on(
-        "/ip4/0.0.0.0/udp/20201/quic-v1".parse()?
-    )?;
-    swarm.listen_on(
-        "/ip4/0.0.0.0/tcp/20201".parse()?
-    )?;
-
+        // specify the external address
+        let external_ip_addr = env::var("EXTERNAL_IP_ADDR")
+            .context("`EXTERNAL_IP_ADDR` environment variable does not exist.")?;
+        let external_port = env::var("EXTERNAL_PORT")
+            .context("`EXTERNAL_PORT` environment variable does not exist.")?;
+        swarm.add_external_address(
+            format!(
+                "/ip4/{}/tcp/{}",
+                external_ip_addr,
+                external_port
+            )
+            .parse()?
+        );
+        swarm.add_external_address(
+            format!(
+                "/ip4/{}/udp/{}/quic-v1",
+                external_ip_addr,
+                external_port
+            )
+            .parse()?
+        );
+    }    
     let mut timer_peer_discovery = IntervalStream::new(
         interval(Duration::from_secs(60))
     )
