@@ -157,16 +157,29 @@ async fn main() -> anyhow::Result<()> {
             warn!("No keys were supplied, so one is generated for you and saved to `./key.secret` file.");
             new_key
         }
-    };    
-    info!("My peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
+    };
+    let my_peer_id = PeerId::from_public_key(&local_key.public());    
+    info!(
+        "My peer id: `{}`",
+        my_peer_id
+    );    
     let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
     // listen on all interfaces
+    // ipv4
     swarm.listen_on(
         "/ip4/0.0.0.0/udp/20201/quic-v1".parse()?
     )?;
     swarm.listen_on(
         "/ip4/0.0.0.0/tcp/20201".parse()?
     )?;
+    // ipv6
+    // ipv6
+    // swarm.listen_on(
+    //     "/ip6/::/udp/20201/quic-v1".parse()?
+    // )?;
+    // swarm.listen_on(
+    //     "/ip6/::/tcp/20201".parse()?
+    // )?;
     // init gossip
     let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
     let _ = swarm
@@ -461,8 +474,7 @@ async fn main() -> anyhow::Result<()> {
                                             job.add_prerequisite(i, input_token.hash);
                                             if blob_store.is_blob_complete(input_token.hash) {
                                                 job.set_prerequisite_as_fulfilled(input_token.hash);
-                                            } else {
-                                                blob_store.add_incomplete_blob(input_token.hash);
+                                            } else {                                                
                                                 if let Some(owner_peer_id) = peer_id_from_bytes(&input_token.owner) {
                                                     get_blob_info_list.push((input_token.hash, owner_peer_id));
                                                 } else {
@@ -473,6 +485,7 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                         pending_jobs.insert(prove_details.id, job);
                                         // request blob info
+                                        //@ retry mechanism?
                                         for (hash, owner_peer_id) in get_blob_info_list.into_iter() {
                                             let _req_id = swarm
                                                 .behaviour_mut()
@@ -507,7 +520,7 @@ async fn main() -> anyhow::Result<()> {
                 })) => {
                     match request {
                         blob_transfer::Request::GetInfo(hash) => {
-                            if let Some(num_chunks) = blob_store.get_blob_info(hash) {
+                            if let Some(num_chunks) = blob_store.get_num_chunks(hash) {
                                 if let Err(e) = swarm
                                     .behaviour_mut()
                                     .blob_transfer
@@ -566,8 +579,8 @@ async fn main() -> anyhow::Result<()> {
                             if pending_jobs
                                 .values_mut()
                                 .any(|j| j.is_a_prerequisite(blob_info.hash))
-                            {    
-                                blob_store.add_blob_info(blob_info.hash, blob_info.num_chunks);
+                            {
+                                blob_store.add_incomplete_blob(blob_info.hash, blob_info.num_chunks);    
                                 //@ check if the blob is incomplete
                                 // request first chunk
                                 let _req_id = swarm
@@ -663,7 +676,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 _ => {
-                    info!("{:#?}", event)
+                    // info!("{:#?}", event)
                 },
             },
 
