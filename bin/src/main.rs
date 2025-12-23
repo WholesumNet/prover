@@ -9,8 +9,8 @@ use futures::{
 };
 
 use std::{
-    error::Error,
     time::Duration,
+    env,
     collections::{
         HashMap,
         VecDeque
@@ -25,34 +25,44 @@ use std::{
 
 use tokio::{
     time::{
-    self, interval
+        self,
+        interval
     },
 };
 use tokio_stream::wrappers::IntervalStream;
 
 use env_logger::Env;
-use log::{info, warn};
+use log::{
+    info,
+    warn
+};
 
 use clap::Parser;
-use xxhash_rust::xxh3::xxh3_128;
 
 use libp2p::{
-    gossipsub, mdns, request_response,
-    identity, identify,  
-    swarm::{SwarmEvent},
+    identity,
+    identify,  
+    gossipsub,
+    mdns,
+    kad,
+    request_response,
+    swarm::{
+        SwarmEvent
+    },
     PeerId,
+    multiaddr::Protocol,
 };
-use anyhow;
-use mongodb::{
-    bson::{
-        doc,
-    },
-    options::{
-        ClientOptions,
-        ServerApi,
-        ServerApiVersion
-    },
-};
+use anyhow::Context;
+// use mongodb::{
+//     bson::{
+//         doc,
+//     },
+//     options::{
+//         ClientOptions,
+//         ServerApi,
+//         ServerApiVersion
+//     },
+// };
 
 use peyk::{
     p2p::{
@@ -71,7 +81,7 @@ use peyk::{
 };
 
 use zkvm::{
-    sp1::SP1CudaHandle
+    sp1::SP1Handle
 };
 use anbar;
 
@@ -96,7 +106,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error + 'static>> {
+async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info"))
         .init();
     let cli = Cli::parse();
@@ -106,15 +116,19 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     ); 
 
     // setup mongodb
-    let _db_client = mongodb_setup("mongodb://localhost:27017").await?;
+    // let _db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
     // maintain jobs
     let mut active_job = None;
     let mut ready_jobs = VecDeque::new();
     let mut pending_jobs = HashMap::new();
 
-    info!("Initializing SP1 CUDA instance...");
-    let sp1_cuda_handle = Arc::new(SP1CudaHandle::new()?);
+    info!("Initializing SP1.");  
+    let sp1_handle = tokio::task::spawn_blocking(|| 
+        Arc::new(SP1Handle::new().unwrap())
+    )
+    .await
+    .unwrap();
 
     // pull jobs to completion
     let mut run_futures = FuturesUnordered::new();
@@ -129,7 +143,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     // blob store
     let mut blob_store = anbar::BlobStore::new();
     
-    // key 
+    // Libp2p swarm 
+    // peer id
     let local_key = {
         if let Some(key_file) = cli.key_file {
             let bytes = std::fs::read(key_file).unwrap();
@@ -142,54 +157,92 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
             warn!("No keys were supplied, so one is generated for you and saved to `./key.secret` file.");
             new_key
         }
-    };    
-    info!("my peer id: `{:?}`", PeerId::from_public_key(&local_key.public()));    
-
-    // Libp2p swarm 
+    };
+    let my_peer_id = PeerId::from_public_key(&local_key.public());    
+    info!(
+        "My peer id: `{}`",
+        my_peer_id
+    );    
     let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
+    // listen on all interfaces
+    // ipv4
+    swarm.listen_on(
+        "/ip4/0.0.0.0/udp/20201/quic-v1".parse()?
+    )?;
+    swarm.listen_on(
+        "/ip4/0.0.0.0/tcp/20201".parse()?
+    )?;
+    // ipv6
+    // ipv6
+    // swarm.listen_on(
+    //     "/ip6/::/udp/20201/quic-v1".parse()?
+    // )?;
+    // swarm.listen_on(
+    //     "/ip6/::/tcp/20201".parse()?
+    // )?;
+    // init gossip
     let topic = gossipsub::IdentTopic::new("<-- Wholesum p2p prover bazaar -->");
     let _ = swarm
         .behaviour_mut()
         .gossipsub
         .subscribe(&topic);
-
-    // bootstrap 
-    if false == cli.dev {
-        // get to know bootnodes
-        const BOOTNODES: [&str; 1] = [
-            "TBD",
-        ];
-        for peer in &BOOTNODES {
-            swarm.behaviour_mut()
-                .kademlia
-                .add_address(&peer.parse()?, "/ip4/W.X.Y.Z/tcp/20201".parse()?);
-        }
-        // find myself
-        if let Err(e) = 
-            swarm
-                .behaviour_mut()
-                .kademlia
-                .bootstrap() {
-            warn!("Failed to bootstrap Kademlia: `{:?}`", e);
-
-        } else {
-            info!("Self-bootstraping is initiated.");
-        }
-    }
-
-    // if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
-    //     eprintln!("failed to initiate bootstrapping: {:#?}", e);
-    // }
-
-    // listen on all interfaces and whatever port the os assigns
-    //@ should read from the config file
-    swarm.listen_on("/ip4/0.0.0.0/udp/20202/quic-v1".parse()?)?;
-    swarm.listen_on("/ip4/0.0.0.0/tcp/20202".parse()?)?;
-    swarm.listen_on("/ip6/::/tcp/20202".parse()?)?;
-    swarm.listen_on("/ip6/::/udp/20202/quic-v1".parse()?)?;
-
+    
+    // init kademlia
+    if !cli.dev {
+        // get to know bootnode(s)
+        let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
+            .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
+        let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
+            .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
+        swarm.behaviour_mut()
+            .kademlia
+            .add_address(
+                &bootnode_peer_id.parse()?,
+                format!(
+                    "/ip4/{}/tcp/20201",
+                    bootnode_ip_addr
+                )
+                .parse()?
+            );
+        // initiate bootstrapping
+        match swarm.behaviour_mut().kademlia.bootstrap() {
+            Ok(query_id) => {            
+                info!(
+                    "Bootstrap is initiated, query id: {:?}",
+                    query_id
+                );
+            },
+            Err(e) => {
+                info!(
+                    "Bootstrap failed: {:?}",
+                    e
+                );
+            }
+        };
+        // specify the external address
+        let external_ip_addr = env::var("EXTERNAL_IP_ADDR")
+            .context("`EXTERNAL_IP_ADDR` environment variable does not exist.")?;
+        let external_port = env::var("EXTERNAL_PORT")
+            .context("`EXTERNAL_PORT` environment variable does not exist.")?;
+        swarm.add_external_address(
+            format!(
+                "/ip4/{}/tcp/{}",
+                external_ip_addr,
+                external_port
+            )
+            .parse()?
+        );
+        swarm.add_external_address(
+            format!(
+                "/ip4/{}/udp/{}/quic-v1",
+                external_ip_addr,
+                external_port
+            )
+            .parse()?
+        );
+    }    
     let mut timer_peer_discovery = IntervalStream::new(
-        interval(Duration::from_secs(5 * 60))
+        interval(Duration::from_secs(60))
     )
     .fuse();
     // it takes ~5s for a rtx 3090 to prove 2m cycles
@@ -197,11 +250,17 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
         interval(Duration::from_secs(5))
     )
     .fuse();
+    // to pull for new peers 
+    let mut timer_pull_rendezvous_providers = IntervalStream::new(
+        interval(Duration::from_secs(10))
+    )
+    .fuse();
+
     loop {
         select! {
             // try to discover new peers
             _i = timer_peer_discovery.select_next_some() => {
-                if true == cli.dev {
+                if !cli.dev {
                     continue;
                 }
                 let random_peer_id = PeerId::random();
@@ -214,10 +273,32 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
 
             _i = timer_satisfy_job_prerequisities.select_next_some() => {},
 
+            // pull for new peers
+            _i = timer_pull_rendezvous_providers.select_next_some() => {
+                // if !cli.dev {
+                //     swarm.behaviour_mut()
+                //         .kademlia
+                //         .get_providers(rendezvous_record.clone().unwrap());
+                // }
+            },
+
             // libp2p events
             event = swarm.select_next_some() => match event {
+                // general events
                 SwarmEvent::NewListenAddr { address, .. } => {
                     info!("Local node is listening on {address}");
+                },
+
+                SwarmEvent::ConnectionEstablished {
+                    peer_id,
+                    endpoint,
+                    ..
+                } => {
+                    println!(
+                        "A connection has been established to {} via {:?}",
+                        peer_id,
+                        endpoint
+                    );                    
                 },
 
                 // mdns events
@@ -259,18 +340,37 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         }
                     )
                 ) => {
-                    // info!("Inbound identify event `{:#?}`", info);
-                    if false == cli.dev {
-                        for addr in info.listen_addrs {
-                            // if false == addr.iter().any(|item| item == &"127.0.0.1" || item == &"::1"){
-                            swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, addr);
-                            // }
-                        }
+                    if !cli.dev {
+                        info!(
+                            "Inbound identify event from {}: {:#?}`",
+                            peer_id,
+                            info
+                        );                        
                     }
+                },
 
+                SwarmEvent::NewExternalAddrOfPeer {
+                    peer_id,
+                    address
+                } => {
+                    let is_public = address.iter()
+                        .filter_map(|c| 
+                            if let Protocol::Ip4(ip4_addr) = c {
+                                Some(ip4_addr)
+                            } else {
+                                None
+                            }
+                        )
+                        .all(|a| !a.is_private() && !a.is_loopback());
+                    if is_public {                        
+                        info!(
+                            "Added public address of the peer to the DHT: {}",
+                            address
+                        );
+                        swarm.behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, address);
+                    }                      
                 },
             
                 SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -299,6 +399,31 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         );                     
                 },
 
+                // kademlia events
+                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                    result: kad::QueryResult::GetClosestPeers(Ok(ok)),
+                    ..
+                })) => {
+                    info!("Query finished with closest peers: {:#?}", ok.peers);
+                },
+
+                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                    result:
+                        kad::QueryResult::GetClosestPeers(Err(kad::GetClosestPeersError::Timeout {
+                            ..
+                        })),
+                    ..
+                })) => {
+                    warn!("Query for closest peers timed out");
+                },
+
+                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                //     result: kad::QueryResult::GetProviders(Ok(found_providers)),
+                //     ..
+                // })) => {
+                    
+                // },
+
                 // requests
                 SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: _peer_id,
@@ -307,7 +432,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         // channel,
                         // request_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {                
                     match request {
                         _ => {
@@ -323,7 +449,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         response,
                         //response_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {                
                     match response {
                         protocol::Response::Job(compute_job) => {                            
@@ -343,12 +470,11 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         );
                                         //@ check if I have the proof already
                                         let mut get_blob_info_list = Vec::new();
-                                        for (i, input_token) in prove_details.batch.iter().enumerate() {
+                                        for (i, input_token) in prove_details.tokens.iter().enumerate() {
                                             job.add_prerequisite(i, input_token.hash);
                                             if blob_store.is_blob_complete(input_token.hash) {
                                                 job.set_prerequisite_as_fulfilled(input_token.hash);
-                                            } else {
-                                                blob_store.add_incomplete_blob(input_token.hash);
+                                            } else {                                                
                                                 if let Some(owner_peer_id) = peer_id_from_bytes(&input_token.owner) {
                                                     get_blob_info_list.push((input_token.hash, owner_peer_id));
                                                 } else {
@@ -359,6 +485,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         }
                                         pending_jobs.insert(prove_details.id, job);
                                         // request blob info
+                                        //@ retry mechanism?
                                         for (hash, owner_peer_id) in get_blob_info_list.into_iter() {
                                             let _req_id = swarm
                                                 .behaviour_mut()
@@ -388,11 +515,12 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         channel,
                         //request_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {
                     match request {
                         blob_transfer::Request::GetInfo(hash) => {
-                            if let Some(num_chunks) = blob_store.get_blob_info(hash) {
+                            if let Some(num_chunks) = blob_store.get_num_chunks(hash) {
                                 if let Err(e) = swarm
                                     .behaviour_mut()
                                     .blob_transfer
@@ -443,15 +571,16 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                         response,
                         //response_id,
                         ..
-                    }
+                    },
+                    ..
                 })) => {                
                     match response {
                         blob_transfer::Response::Info(blob_info) => {
                             if pending_jobs
                                 .values_mut()
                                 .any(|j| j.is_a_prerequisite(blob_info.hash))
-                            {    
-                                blob_store.add_blob_info(blob_info.hash, blob_info.num_chunks);
+                            {
+                                blob_store.add_incomplete_blob(blob_info.hash, blob_info.num_chunks);    
                                 //@ check if the blob is incomplete
                                 // request first chunk
                                 let _req_id = swarm
@@ -532,7 +661,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                         info!("Starting job(`{}`)...", job.get_batch_id());
                                         run_futures.push(
                                             spawn_run(
-                                                Arc::clone(&sp1_cuda_handle),
+                                                Arc::clone(&sp1_handle),
+                                                job.get_batch_id(),
                                                 inputs,
                                                 job.kind.clone()
                                             )
@@ -546,14 +676,14 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                 },
 
                 _ => {
-                    // println!("{:#?}", event)
+                    // info!("{:#?}", event)
                 },
             },
 
             result = run_futures.select_next_some() => {                
                 if let Err(e) = result {
                     let job: Job = active_job.take().unwrap();
-                    warn!("Failed to run job(`{}`): `{:?}`", job.id, e);
+                    warn!("Failed to run job(`{}`): `{:?}`", job.get_batch_id(), e);
                     continue
                 }
                 let proof = result.unwrap();
@@ -567,7 +697,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     sub_id,
                                     job.id
                                 );
-                                let hash = xxh3_128(&proof);
+                                let hash = blob_store.store(proof);                                
                                 let _req_id = swarm
                                     .behaviour_mut()
                                     .req_resp
@@ -581,7 +711,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             }
                                         )
                                     );
-                                blob_store.store(proof);
                             },
 
                             zkvm::SP1Op::ProveAgg => {
@@ -590,7 +719,7 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                     sub_id,
                                     job.id
                                 );
-                                let hash = xxh3_128(&proof);
+                                let hash = blob_store.store(proof);
                                 let _req_id = swarm
                                     .behaviour_mut()
                                     .req_resp
@@ -604,7 +733,6 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                                             }
                                         )
                                     );
-                                blob_store.store(proof);
                             }
                         };
                     },
@@ -623,7 +751,8 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
                     info!("Starting job(`{}`)...", job.get_batch_id());
                     run_futures.push(
                         spawn_run(
-                            Arc::clone(&sp1_cuda_handle),
+                            Arc::clone(&sp1_handle),
+                            job.get_batch_id(),
                             inputs,
                             job.kind.clone()
                         )
@@ -635,25 +764,27 @@ async fn main() -> Result<(), Box<dyn Error + 'static>> {
     }
 }
 
-async fn mongodb_setup(
-    uri: &str,
-) -> anyhow::Result<mongodb::Client> {
-    info!("Connecting to the MongoDB daemon...");
-    let mut client_options = ClientOptions::parse(uri).await?;
-    let server_api = ServerApi::builder().version(ServerApiVersion::V1).build();
-    client_options.server_api = Some(server_api);
-    let client = mongodb::Client::with_options(client_options)?;
-    // Send a ping to confirm a successful connection
-    client
-        .database("admin")
-        .run_command(doc! { "ping": 1 })
-        .await?;
-    info!("Successfully connected to the MongoDB instance.");
-    Ok(client)
-}
+
+// async fn mongodb_setup(
+//     uri: &str,
+// ) -> anyhow::Result<mongodb::Client> {
+//     info!("Connecting to the MongoDB daemon...");
+//     let mut client_options = ClientOptions::parse(uri).await?;
+//     let server_api = ServerApi::builder().version(ServerApiVersion::V1).build();
+//     client_options.server_api = Some(server_api);
+//     let client = mongodb::Client::with_options(client_options)?;
+//     // Send a ping to confirm a successful connection
+//     client
+//         .database("admin")
+//         .run_command(doc! { "ping": 1 })
+//         .await?;
+//     info!("Successfully connected to the MongoDB instance.");
+//     Ok(client)
+// }
 
 async fn spawn_run(
-    sp1_cuda_handle: Arc<SP1CudaHandle>,
+    sp1_handle: Arc<SP1Handle>,
+    batch_id: u128,
     inputs: Vec<Vec<u8>>,
     kind: zkvm::JobKind
 ) -> anyhow::Result<Vec<u8>>{
@@ -663,16 +794,17 @@ async fn spawn_run(
                 zkvm::JobKind::SP1(ref op, _batch_id) => {
                     match op {
                         zkvm::SP1Op::ProveSubblock => {
-                            let sp1_cuda_handle = Arc::clone(&sp1_cuda_handle);
+                            let sp1_handle = Arc::clone(&sp1_handle);
                             let stdin = inputs.into_iter().next().unwrap();                            
-                            sp1_cuda_handle.prove_subblock(stdin)                            
+                            sp1_handle.prove_subblock_on_cluster(batch_id, stdin)                            
                         },
 
                         zkvm::SP1Op::ProveAgg => {
                             let mut iter = inputs.into_iter();
                             let stdin = iter.next().unwrap();
                             let subblock_proofs = iter.collect();
-                            sp1_cuda_handle.prove_agg(
+                            sp1_handle.prove_aggregation_on_cluster(
+                                batch_id,
                                 stdin,
                                 subblock_proofs,
                             )
