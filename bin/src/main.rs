@@ -22,7 +22,6 @@ use std::{
         Arc,
     },
 };
-
 use tokio::{
     time::{
         self,
@@ -30,15 +29,14 @@ use tokio::{
     },
 };
 use tokio_stream::wrappers::IntervalStream;
-
 use env_logger::Env;
 use log::{
     info,
     warn
 };
-
 use clap::Parser;
-
+use anyhow::Context;
+use xxhash_rust::xxh3::xxh3_128;
 use libp2p::{
     identity,
     identify,  
@@ -52,7 +50,6 @@ use libp2p::{
     PeerId,
     multiaddr::Protocol,
 };
-use anyhow::Context;
 // use mongodb::{
 //     bson::{
 //         doc,
@@ -83,7 +80,7 @@ use peyk::{
 use zkvm::{
     sp1::SP1Handle
 };
-use anbar;
+// use anbar;
 
 mod job;
 use job::Job;
@@ -141,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
     // let mut db_insert_futures = FuturesUnordered::new();
 
     // blob store
-    let mut blob_store = anbar::BlobStore::new();
+    let mut blob_store = HashMap::<u128, Vec<u8>>::new();
     
     // Libp2p swarm 
     // peer id
@@ -340,13 +337,13 @@ async fn main() -> anyhow::Result<()> {
                         }
                     )
                 ) => {
-                    if !cli.dev {
-                        info!(
-                            "Inbound identify event from {}: {:#?}`",
-                            peer_id,
-                            info
-                        );                        
-                    }
+                    // if !cli.dev {
+                    //     info!(
+                    //         "Inbound identify event from {}: {:#?}`",
+                    //         peer_id,
+                    //         info
+                    //     );                        
+                    // }
                 },
 
                 SwarmEvent::NewExternalAddrOfPeer {
@@ -472,7 +469,7 @@ async fn main() -> anyhow::Result<()> {
                                         let mut get_blob_info_list = Vec::new();
                                         for (i, input_token) in prove_details.tokens.iter().enumerate() {
                                             job.add_prerequisite(i, input_token.hash);
-                                            if blob_store.is_blob_complete(input_token.hash) {
+                                            if blob_store.contains_key(&input_token.hash) {
                                                 job.set_prerequisite_as_fulfilled(input_token.hash);
                                             } else {                                                
                                                 if let Some(owner_peer_id) = peer_id_from_bytes(&input_token.owner) {
@@ -492,10 +489,10 @@ async fn main() -> anyhow::Result<()> {
                                                 .blob_transfer
                                                 .send_request(
                                                     &owner_peer_id,
-                                                    blob_transfer::Request::GetInfo(hash)
+                                                    blob_transfer::Request(hash.to_string())
                                                 );
                                             info!(
-                                                "Requested info of blob(`{}`) from `{}`",
+                                                "Requested blob(`{}`) from `{}`",
                                                 hash,
                                                 owner_peer_id
                                             );
@@ -509,58 +506,43 @@ async fn main() -> anyhow::Result<()> {
 
                 // blob transfer requests
                 SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
-                    peer: _peer_id,
+                    peer: peer_id,
                     message: request_response::Message::Request {
-                        request,
+                        request: blob_transfer::Request(blob_hash),
                         channel,
                         //request_id,
                         ..
                     },
                     ..
                 })) => {
-                    match request {
-                        blob_transfer::Request::GetInfo(hash) => {
-                            if let Some(num_chunks) = blob_store.get_num_chunks(hash) {
-                                if let Err(e) = swarm
-                                    .behaviour_mut()
-                                    .blob_transfer
-                                        .send_response(
-                                            channel,
-                                            blob_transfer::Response::Info(blob_transfer::BlobInfo {
-                                                hash: hash,
-                                                num_chunks: num_chunks,
-                                            })
-                                        )
-                                {
-                                    warn!("Failed to send back blob info: `{e:?}`");
-                                }
-                            }
-                        },
-
-                        blob_transfer::Request::GetChunk(blob_hash, req_chunk_index) => {
-                            if let Some((data, chunk_hash)) = blob_store.get_chunk(
+                    let blob_hash = blob_hash.parse::<u128>().unwrap();
+                    if let Some(blob) = blob_store.get(&blob_hash) {
+                        if let Err(e) = swarm
+                            .behaviour_mut()
+                            .blob_transfer
+                                .send_response(
+                                    channel,
+                                    blob_transfer::Response(blob.clone())
+                                )
+                        {
+                            warn!(
+                                "Failed to initiate the requested blob(`{}`)'s transmission: `{:?}`.",
                                 blob_hash,
-                                req_chunk_index
-                            ) {
-                                if let Err(e) = swarm
-                                    .behaviour_mut()
-                                    .blob_transfer
-                                        .send_response(
-                                            channel,
-                                            blob_transfer::Response::Chunk(
-                                                blob_transfer::BlobChunk {
-                                                    blob_hash: blob_hash,
-                                                    index: req_chunk_index,
-                                                    data: data,
-                                                    chunk_hash: chunk_hash,
-                                                }
-                                            )
-                                        )
-                                {
-                                    warn!("Failed to send back the blob chunk: `{e:?}`");
-                                }
-                            }
-                        },
+                                e
+                            );
+                        } else {
+                            info!(
+                                "The requested blob(`{}`)'s transmission to `{}` is initiated: {:.2} KB",
+                                blob_hash,
+                                peer_id,
+                                blob.len() as f64 / 1024.0f64
+                            );
+                        }                            
+                    } else {
+                        warn!(
+                            "The requested blob(`{}`) does not exist.",
+                            blob_hash,
+                        );
                     }
                 },
 
@@ -568,108 +550,73 @@ async fn main() -> anyhow::Result<()> {
                 SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
                     peer: peer_id,
                     message: request_response::Message::Response {
-                        response,
+                        response: blob_transfer::Response(blob),
                         //response_id,
                         ..
                     },
                     ..
                 })) => {                
-                    match response {
-                        blob_transfer::Response::Info(blob_info) => {
-                            if pending_jobs
-                                .values_mut()
-                                .any(|j| j.is_a_prerequisite(blob_info.hash))
-                            {
-                                blob_store.add_incomplete_blob(blob_info.hash, blob_info.num_chunks);    
-                                //@ check if the blob is incomplete
-                                // request first chunk
-                                let _req_id = swarm
-                                    .behaviour_mut()
-                                    .blob_transfer
-                                    .send_request(
-                                        &peer_id,
-                                        blob_transfer::Request::GetChunk(blob_info.hash, 0)
-                                    );
-                                info!(
-                                    "Requested the first chunk of the blob(`{}`) from `{}`",
-                                    blob_info.hash,
-                                    peer_id
-                                );                                
-                            } else {
-                                warn!("Received unsolicited blob info: `{blob_info:?}`");
-                            }
-                        },
-
-                        blob_transfer::Response::Chunk(blob_chunk) => {
-                            let mut ready_job = None;
-                            if let Some(job) = pending_jobs
-                                .values_mut()
-                                .find(|j| j.is_a_prerequisite(blob_chunk.blob_hash))
-                            {
-                                //@ assumed owner === chunk sender
-                                blob_store.add_blob_chunk(
-                                    blob_chunk.blob_hash,
-                                    blob_chunk.index,
-                                    blob_chunk.data,
-                                    blob_chunk.chunk_hash
-                                );
-                                if blob_store.is_blob_complete(blob_chunk.blob_hash) {
-                                    job.set_prerequisite_as_fulfilled(blob_chunk.blob_hash);
-                                }
-                                if job.is_ready() {
-                                    let prove_id = match job.kind {
-                                        zkvm::JobKind::SP1(_, id) => id,                                        
-                                    };
-                                    ready_job = Some(prove_id);
-                                } else {
-                                    // request next chunk
-                                    if let Some(next_chunk_index) = blob_store.get_next_blob_chunk_index(blob_chunk.blob_hash) {
-                                        let _req_id = swarm
-                                            .behaviour_mut()
-                                            .blob_transfer
-                                            .send_request(
-                                                &peer_id,
-                                                blob_transfer::Request::GetChunk(blob_chunk.blob_hash, next_chunk_index)
-                                            );
-                                    }
-                                    // info!(
-                                    //     "Requested next chunk({}) of the blob `{}` from `{}`",
-                                    //     next_chunk_index,
-                                    //     blob_chunk.blob_hash,
-                                    //     peer_id
-                                    // );
-                                }
-                            } else {
-                                warn!("Ignored unsolicited blob chunk for `{}`", blob_chunk.blob_hash);
-                                continue
-                            }
+                    let mut ready_job = None;
+                    let blob_hash = xxh3_128(&blob);
+                    if let Some(job) = pending_jobs
+                        .values_mut()
+                        .find(|j| j.is_a_prerequisite(blob_hash))
+                    {
+                        blob_store.insert(blob_hash, blob);
+                        job.set_prerequisite_as_fulfilled(blob_hash);
+                        info!(
+                            "Prerequisite(`{}`) of job(`{}`) is fullfilled.",
+                            blob_hash,
+                            job.get_batch_id()
+                        );
+                        if job.is_ready() {
+                            let prove_id = match job.kind {
+                                zkvm::JobKind::SP1(_, id) => id,                                        
+                            };
+                            ready_job = Some(prove_id);
+                        }
+                    } else {
+                        warn!(
+                            "Received unsolicited blob(`{}`) from `{}`.",
+                            blob_hash,
+                            peer_id
+                        );
+                        continue;
+                    }
+                    // run it
+                    if let Some(id) = ready_job {
+                        ready_jobs.push_back(pending_jobs.remove(&id).unwrap());
+                        info!(
+                            "Job(`{}`) is ready to run.",
+                            id
+                        );
+                        if active_job.is_none() {
                             // run it
-                            if let Some(id) = ready_job {
-                                ready_jobs.push_back(pending_jobs.remove(&id).unwrap());
-                                info!("Job's prerequisites are fullfilled and is ready to run.");
-                                if active_job.is_none() {
-                                    // run it
-                                    if let Some(job) = ready_jobs.pop_front() {
-                                        let mut inputs = Vec::new();
-                                        for blob_hash in job.prerequisites().iter() {
-                                            if let Some(blob) = blob_store.get_blob(*blob_hash) {
-                                                inputs.push(blob);
-                                            } else {
-                                                warn!("Input is not available, job cannot start.");
-                                            }
-                                        }
-                                        info!("Starting job(`{}`)...", job.get_batch_id());
-                                        run_futures.push(
-                                            spawn_run(
-                                                Arc::clone(&sp1_handle),
-                                                job.get_batch_id(),
-                                                inputs,
-                                                job.kind.clone()
-                                            )
-                                        );                                        
-                                        active_job = Some(job);
+                            if let Some(job) = ready_jobs.pop_front() {
+                                let mut inputs = Vec::new();
+                                for blob_hash in job.prerequisites().into_iter() {
+                                    if let Some(blob) = blob_store.get(&blob_hash) {
+                                        inputs.push(blob.clone());
+                                    } else {
+                                        warn!(
+                                            "Input(`{}`) is not available, job cannot start.",
+                                            blob_hash
+                                        );
                                     }
                                 }
+                                info!(
+                                    "Prove started for job(`{}`).",
+                                    job.get_batch_id()
+                                );
+                                run_futures.push(
+                                    spawn_run(
+                                        Arc::clone(&sp1_handle),
+                                        job.get_batch_id(),
+                                        inputs,
+                                        job.kind.clone()
+                                    )
+                                );                                        
+                                active_job = Some(job);
                             }
                         }
                     }
@@ -683,8 +630,12 @@ async fn main() -> anyhow::Result<()> {
             result = run_futures.select_next_some() => {                
                 if let Err(e) = result {
                     let job: Job = active_job.take().unwrap();
-                    warn!("Failed to run job(`{}`): `{:?}`", job.get_batch_id(), e);
-                    continue
+                    warn!(
+                        "Failed to run job(`{}`): `{:?}`",
+                        job.get_batch_id(),
+                        e
+                    );
+                    continue;
                 }
                 let proof = result.unwrap();
                 let job = active_job.take().unwrap();
@@ -697,7 +648,11 @@ async fn main() -> anyhow::Result<()> {
                                     sub_id,
                                     job.id
                                 );
-                                let hash = blob_store.store(proof);                                
+                                let hash = {
+                                    let hash = xxh3_128(&proof);
+                                    blob_store.insert(hash, proof);
+                                    hash
+                                };
                                 let _req_id = swarm
                                     .behaviour_mut()
                                     .req_resp
@@ -719,7 +674,11 @@ async fn main() -> anyhow::Result<()> {
                                     sub_id,
                                     job.id
                                 );
-                                let hash = blob_store.store(proof);
+                                let hash = {
+                                    let hash = xxh3_128(&proof);
+                                    blob_store.insert(hash, proof);
+                                    hash
+                                };
                                 let _req_id = swarm
                                     .behaviour_mut()
                                     .req_resp
@@ -741,14 +700,17 @@ async fn main() -> anyhow::Result<()> {
                 // start a new prove
                 if let Some(job) = ready_jobs.pop_front() {
                     let mut inputs = Vec::new();
-                    for blob_hash in job.prerequisites().iter() {
-                        if let Some(blob) = blob_store.get_blob(*blob_hash) {
-                            inputs.push(blob);
+                    for blob_hash in job.prerequisites().into_iter() {
+                        if let Some(blob) = blob_store.get(&blob_hash) {
+                            inputs.push(blob.clone());
                         } else {
                             warn!("Input is not available, job cannot start.");
                         }
                     }     
-                    info!("Starting job(`{}`)...", job.get_batch_id());
+                    info!(
+                        "Prove started for job(`{}`).",
+                        job.get_batch_id()
+                    );
                     run_futures.push(
                         spawn_run(
                             Arc::clone(&sp1_handle),

@@ -5058,7 +5058,8 @@ dependencies = [
  "env_logger",
  "futures",
  "libp2p",
- "libp2p-quic 0.10.3",
+ "libp2p-quic 0.13.0",
+ "log",
  "serde",
  "tokio",
 ]
