@@ -63,13 +63,19 @@ impl SP1Handle {
             .arg("http://localhost:50051")
             .arg("--redis-nodes")
             .arg("redis://:redispassword@localhost:6379/0")
+            .arg(batch_id.to_string())
             .arg("../elfs/subblock_elf.bin")
             .arg(stdin_filename)
             .status()?;
         if !status.success() {
             anyhow::bail!("Proving failed: {status:?}")
         }
-        let proof = fs::read("../sp1-cluster/proof.bin")?;
+        let proof = fs::read(
+            format!(
+                "../sp1-cluster/proof-{}.bin",
+                batch_id
+            )
+        )?;
         let dur = start.elapsed();
         info!("Proving is finished in `{:.3}s`.", dur.as_secs_f64());
         Ok(proof)
@@ -104,13 +110,19 @@ impl SP1Handle {
             .arg("http://localhost:50051")
             .arg("--redis-nodes")
             .arg("redis://:redispassword@localhost:6379/0")
+            .arg(batch_id.to_string())
             .arg("../elfs/agg_elf.bin")
             .arg(stdin_filename)
             .status()?;
         if !status.success() {
             anyhow::bail!("Proving failed: {status:?}")
-        }
-        let agg_proof = SP1ProofWithPublicValues::load("../sp1-cluster/proof.bin")?;
+        }        
+        let agg_proof = SP1ProofWithPublicValues::load(
+            format!(
+                "../sp1-cluster/proof-{}.bin",
+                batch_id
+            )
+        )?;
         let dur = start.elapsed();
         info!("Proving is finished in `{:.3}s`.", dur.as_secs_f64());
         info!("Verifying the aggregation proof.");
