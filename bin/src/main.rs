@@ -166,9 +166,9 @@ async fn main() -> anyhow::Result<()> {
     swarm.listen_on(
         "/ip4/0.0.0.0/udp/20201/quic-v1".parse()?
     )?;
-    swarm.listen_on(
-        "/ip4/0.0.0.0/tcp/20201".parse()?
-    )?;
+    // swarm.listen_on(
+    //     "/ip4/0.0.0.0/tcp/20201".parse()?
+    // )?;
     // ipv6
     // ipv6
     // swarm.listen_on(
