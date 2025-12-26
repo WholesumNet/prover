@@ -237,13 +237,6 @@ async fn main() -> anyhow::Result<()> {
             )
             .parse()?
         );
-        info!(
-            "Protocol names: {:?}",
-            swarm
-                .behaviour_mut()
-                .kademlia
-                .protocol_names()
-        );
     }    
     let mut timer_peer_discovery = IntervalStream::new(
         interval(Duration::from_secs(60))
