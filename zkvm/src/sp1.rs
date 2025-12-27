@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     time::Instant,
     process::Command
 };
@@ -91,9 +92,13 @@ impl SP1Handle {
         info!("Proving aggregation is initiated.");
         let start = Instant::now();        
         let mut stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;
-        for proof_blob in subblock_proofs.into_iter() {
-            fs::write("./temp-proof.bin", &proof_blob)?;
-            let proof = SP1ProofWithPublicValues::load("./temp-proof.bin")?;
+        for (i, proof_blob) in subblock_proofs.into_iter().enumerate() {
+            // fs::write("./temp-proof.bin", &proof_blob)?;
+            let tmp_filename = format!("./temp-proof-{}.bin", i);
+            let mut f = fs::File::create(&tmp_filename)?;
+            f.write_all(&proof_blob)?;
+            f.sync_all()?;
+            let proof = SP1ProofWithPublicValues::load(tmp_filename)?;
             let reduced_proof = proof.proof.try_as_compressed()
                 .ok_or_else(|| anyhow::anyhow!("The input subblock proof is not of `reduced` type."))?;
             stdin.write_proof(*reduced_proof, self.subblock_vk.clone().vk);
