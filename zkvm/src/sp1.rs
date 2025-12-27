@@ -94,10 +94,13 @@ impl SP1Handle {
         let mut stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;
         for (i, proof_blob) in subblock_proofs.into_iter().enumerate() {
             // fs::write("./temp-proof.bin", &proof_blob)?;
-            let tmp_filename = format!("./temp-proof-{}.bin", i);
-            let mut f = fs::File::create(&tmp_filename)?;
-            f.write_all(&proof_blob)?;
-            f.sync_all()?;
+            let tmp_filename = {
+                let tmp_filename = format!("./temp-proof-{}.bin", i);
+                let mut f = fs::File::create(&tmp_filename)?;
+                f.write_all(&proof_blob)?;
+                f.sync_all()?;
+                tmp_filename
+            };
             let proof = SP1ProofWithPublicValues::load(tmp_filename)?;
             let reduced_proof = proof.proof.try_as_compressed()
                 .ok_or_else(|| anyhow::anyhow!("The input subblock proof is not of `reduced` type."))?;
