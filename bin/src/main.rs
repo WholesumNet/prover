@@ -454,16 +454,27 @@ async fn main() -> anyhow::Result<()> {
                             match compute_job.kind {                                
                                 protocol::JobKind::SP1(sp1_op) => match sp1_op {                                    
                                     protocol::SP1Op::Prove(prove_details) => {
-                                        info!("Received Prove job from `{client_peer_id}`.");
-                                        let op = match prove_details.elf_kind {
-                                            protocol::ELFKind::Subblock => zkvm::SP1Op::ProveSubblock,
+                                        let (op, kind_str) = match prove_details.elf_kind {
+                                            protocol::ELFKind::Subblock => (
+                                                zkvm::SP1Op::ProveSubblock,
+                                                "Subblock"
+                                            ),
 
-                                            protocol::ELFKind::Agg => zkvm::SP1Op::ProveAgg,
+                                            protocol::ELFKind::Agg => (
+                                                zkvm::SP1Op::ProveAgg,
+                                                "Aggregation"
+                                            )
                                         };
                                         let mut job = Job::new(
                                             compute_job.id,
-                                            client_peer_id,
+                                            client_peer_id.clone(),
                                             zkvm::JobKind::SP1(op, prove_details.id)
+                                        );
+                                        info!(
+                                            "Received Prove job('{}') from `{}`: `{}`.",
+                                            job.get_batch_id(),
+                                            client_peer_id,
+                                            kind_str
                                         );
                                         //@ check if I have the proof already
                                         let mut get_blob_info_list = Vec::new();
@@ -471,8 +482,17 @@ async fn main() -> anyhow::Result<()> {
                                             job.add_prerequisite(i, input_token.hash);
                                             if blob_store.contains_key(&input_token.hash) {
                                                 job.set_prerequisite_as_fulfilled(input_token.hash);
+                                                info!(
+                                                    "Prerequisite blob(`{}`) is alreay fullfilled.",
+                                                    input_token.hash
+                                                );
                                             } else {                                                
                                                 if let Some(owner_peer_id) = peer_id_from_bytes(&input_token.owner) {
+                                                    info!(
+                                                        "Need to request outstanding blob(`{}`) from `{}`.",
+                                                        input_token.hash,
+                                                        owner_peer_id
+                                                    );
                                                     get_blob_info_list.push((input_token.hash, owner_peer_id));
                                                 } else {
                                                     warn!("Job will never run due to missing owner PeerId.");
@@ -492,7 +512,7 @@ async fn main() -> anyhow::Result<()> {
                                                     blob_transfer::Request(hash.to_string())
                                                 );
                                             info!(
-                                                "Requested blob(`{}`) from `{}`",
+                                                "Requested outstanding blob(`{}`) from `{}`.",
                                                 hash,
                                                 owner_peer_id
                                             );
@@ -565,7 +585,7 @@ async fn main() -> anyhow::Result<()> {
                         blob_store.insert(blob_hash, blob);
                         job.set_prerequisite_as_fulfilled(blob_hash);
                         info!(
-                            "Prerequisite(`{}`) of job(`{}`) is fullfilled.",
+                            "Prerequisite blob(`{}`) of job(`{}`) is fullfilled.",
                             blob_hash,
                             job.get_batch_id()
                         );
