@@ -504,7 +504,7 @@ async fn main() -> anyhow::Result<()> {
                                         // request blob info
                                         //@ retry mechanism?
                                         for (hash, owner_peer_id) in get_blob_info_list.into_iter() {
-                                            let _req_id = swarm
+                                            let req_id = swarm
                                                 .behaviour_mut()
                                                 .blob_transfer
                                                 .send_request(
@@ -512,9 +512,10 @@ async fn main() -> anyhow::Result<()> {
                                                     blob_transfer::Request(hash.to_string())
                                                 );
                                             info!(
-                                                "Requested outstanding blob(`{}`) from `{}`.",
+                                                "Requested outstanding blob(`{}`) from `{}`. req_id: `{:?}`.",
                                                 hash,
-                                                owner_peer_id
+                                                owner_peer_id,
+                                                req_id
                                             );
                                         }
                                     },
@@ -524,13 +525,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 },
 
-                // blob transfer requests
+                // <blob transfer>
+                // requests
                 SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
                     peer: peer_id,
                     message: request_response::Message::Request {
                         request: blob_transfer::Request(blob_hash),
                         channel,
-                        //request_id,
+                        request_id,
                         ..
                     },
                     ..
@@ -546,9 +548,11 @@ async fn main() -> anyhow::Result<()> {
                                 )
                         {
                             warn!(
-                                "Failed to initiate the requested blob(`{}`)'s transmission: `{:?}`.",
+                                "Failed to initiate the requested blob(`{}`)'s transmission to `{}`. req_id `{:?}`: `{:?}`.",
                                 blob_hash,
-                                e
+                                peer_id,
+                                request_id,
+                                e,
                             );
                         } else {
                             info!(
@@ -566,12 +570,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                 },
 
-                // blob transfer responses
+                // responses
                 SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
                     peer: peer_id,
                     message: request_response::Message::Response {
                         response: blob_transfer::Response(blob),
-                        //response_id,
+                        // response_id,
                         ..
                     },
                     ..
@@ -640,6 +644,38 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
+                },
+
+                // inbound
+                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::InboundFailure {
+                    peer: peer_id,
+                    connection_id,
+                    request_id,
+                    error,
+                })) => {
+                    warn!(
+                        "Blob transfer `inbound failure`: peer `{}`, con_id: {:?}, req_id: {:?}, e: {:?} ",
+                        peer_id,
+                        connection_id,
+                        request_id,
+                        error
+                    );
+                },
+
+                // outbound
+                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::OutboundFailure {
+                    peer: peer_id,
+                    connection_id,
+                    request_id,
+                    error,
+                })) => {
+                    warn!(
+                        "Blob transfer `outbound failure`: peer `{}`, con_id: {:?}, req_id: {:?}, e: {:?} ",
+                        peer_id,
+                        connection_id,
+                        request_id,
+                        error
+                    );
                 },
 
                 _ => {
