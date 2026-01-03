@@ -41,7 +41,6 @@ use libp2p::{
     identity,
     identify,  
     gossipsub,
-    mdns,
     kad,
     request_response,
     swarm::{
@@ -62,9 +61,7 @@ use libp2p::{
 // };
 
 use peyk::{
-    p2p::{
-        MyBehaviourEvent
-    },
+    p2p::GlobalBehaviourEvent,
     protocol,
     protocol::{
         NeedKind,
@@ -80,7 +77,6 @@ use peyk::{
 use zkvm::{
     sp1::SP1Handle
 };
-// use anbar;
 
 mod job;
 use job::Job;
@@ -95,9 +91,6 @@ use job::Job;
           long_about = None)
 ]
 struct Cli {
-    #[arg(long, action)]
-    dev: bool,
-
     #[arg(short, long)]
     key_file: Option<String>,
 }
@@ -108,10 +101,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let cli = Cli::parse();
     info!("<-> `Prover` agent for Wholesum network <->");
-    info!("Operating mode: `{}` network",
-        if false == cli.dev { "global" } else { "local(development)" }
-    ); 
-
+   
     // setup mongodb
     // let _db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
@@ -160,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
         "My peer id: `{}`",
         my_peer_id
     );    
-    let mut swarm = peyk::p2p::setup_swarm(&local_key)?;
+    let mut swarm = peyk::p2p::setup_global_swarm(&local_key)?;
     // listen on all interfaces
     // ipv4
     swarm.listen_on(
@@ -184,60 +174,57 @@ async fn main() -> anyhow::Result<()> {
         .gossipsub
         .subscribe(&topic);
     
-    // init kademlia
-    if !cli.dev {
-        // get to know bootnode(s)
-        let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
-            .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
-        let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
-            .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
-        swarm.behaviour_mut()
-            .kademlia
-            .add_address(
-                &bootnode_peer_id.parse()?,
-                format!(
-                    "/ip4/{}/tcp/20201",
-                    bootnode_ip_addr
-                )
-                .parse()?
+    // init kademlia: get to know bootnode(s)
+    let bootnode_peer_id = env::var("BOOTNODE_PEER_ID")
+        .context("`BOOTNODE_PEER_ID` environment variable does not exist.")?;
+    let bootnode_ip_addr = env::var("BOOTNODE_IP_ADDR")
+        .context("`BOOTNODE_IP_ADDR` environment variable does not exist.")?;
+    swarm.behaviour_mut()
+        .kademlia
+        .add_address(
+            &bootnode_peer_id.parse()?,
+            format!(
+                "/ip4/{}/tcp/20201",
+                bootnode_ip_addr
+            )
+            .parse()?
+        );
+    // initiate bootstrapping
+    match swarm.behaviour_mut().kademlia.bootstrap() {
+        Ok(query_id) => {            
+            info!(
+                "Bootstrap is initiated, query id: {:?}",
+                query_id
             );
-        // initiate bootstrapping
-        match swarm.behaviour_mut().kademlia.bootstrap() {
-            Ok(query_id) => {            
-                info!(
-                    "Bootstrap is initiated, query id: {:?}",
-                    query_id
-                );
-            },
-            Err(e) => {
-                info!(
-                    "Bootstrap failed: {:?}",
-                    e
-                );
-            }
-        };
-        // specify the external address
-        let external_ip_addr = env::var("EXTERNAL_IP_ADDR")
-            .context("`EXTERNAL_IP_ADDR` environment variable does not exist.")?;
-        let external_port = env::var("EXTERNAL_PORT")
-            .context("`EXTERNAL_PORT` environment variable does not exist.")?;
-        swarm.add_external_address(
-            format!(
-                "/ip4/{}/tcp/{}",
-                external_ip_addr,
-                external_port
-            )
-            .parse()?
-        );
-        swarm.add_external_address(
-            format!(
-                "/ip4/{}/udp/{}/quic-v1",
-                external_ip_addr,
-                external_port
-            )
-            .parse()?
-        );
-    }    
+        },
+        Err(e) => {
+            info!(
+                "Bootstrap failed: {:?}",
+                e
+            );
+        }
+    };
+    // specify the external address
+    let external_ip_addr = env::var("EXTERNAL_IP_ADDR")
+        .context("`EXTERNAL_IP_ADDR` environment variable does not exist.")?;
+    let external_port = env::var("EXTERNAL_PORT")
+        .context("`EXTERNAL_PORT` environment variable does not exist.")?;
+    swarm.add_external_address(
+        format!(
+            "/ip4/{}/tcp/{}",
+            external_ip_addr,
+            external_port
+        )
+        .parse()?
+    );
+    swarm.add_external_address(
+        format!(
+            "/ip4/{}/udp/{}/quic-v1",
+            external_ip_addr,
+            external_port
+        )
+        .parse()?
+    );
     let mut timer_peer_discovery = IntervalStream::new(
         interval(Duration::from_secs(60))
     )
@@ -247,19 +234,11 @@ async fn main() -> anyhow::Result<()> {
         interval(Duration::from_secs(5))
     )
     .fuse();
-    // to pull for new peers 
-    let mut timer_pull_rendezvous_providers = IntervalStream::new(
-        interval(Duration::from_secs(10))
-    )
-    .fuse();
-
+    
     loop {
         select! {
             // try to discover new peers
-            _i = timer_peer_discovery.select_next_some() => {
-                if !cli.dev {
-                    continue;
-                }
+            _i = timer_peer_discovery.select_next_some() => {                
                 let random_peer_id = PeerId::random();
                 info!("Searching for the closest peers to `{random_peer_id}`");
                 swarm
@@ -269,15 +248,6 @@ async fn main() -> anyhow::Result<()> {
             },
 
             _i = timer_satisfy_job_prerequisities.select_next_some() => {},
-
-            // pull for new peers
-            _i = timer_pull_rendezvous_providers.select_next_some() => {
-                // if !cli.dev {
-                //     swarm.behaviour_mut()
-                //         .kademlia
-                //         .get_providers(rendezvous_record.clone().unwrap());
-                // }
-            },
 
             // libp2p events
             event = swarm.select_next_some() => match event {
@@ -296,40 +266,11 @@ async fn main() -> anyhow::Result<()> {
                         peer_id,
                         endpoint
                     );                    
-                },
-
-                // mdns events
-                SwarmEvent::Behaviour(
-                    MyBehaviourEvent::Mdns(
-                        mdns::Event::Discovered(list)
-                    )
-                ) => {
-                    for (peer_id, _multiaddr) in list {
-                        info!("mDNS discovered a new peer: {peer_id}");
-                        swarm
-                            .behaviour_mut()
-                            .gossipsub
-                            .add_explicit_peer(&peer_id);
-                    }
-                },
-
-                SwarmEvent::Behaviour(
-                    MyBehaviourEvent::Mdns(
-                        mdns::Event::Expired(list)
-                    )
-                ) => {
-                    for (peer_id, _multiaddr) in list {
-                        info!("mDNS discovered peer has expired: {peer_id}");
-                        swarm
-                            .behaviour_mut()
-                            .gossipsub
-                            .remove_explicit_peer(&peer_id);
-                    }
-                },
+                },                
 
                 // identify events
                 SwarmEvent::Behaviour(
-                    MyBehaviourEvent::Identify(
+                    GlobalBehaviourEvent::Identify(
                         identify::Event::Received {
                             // peer_id,
                             // info,
@@ -337,13 +278,11 @@ async fn main() -> anyhow::Result<()> {
                         }
                     )
                 ) => {
-                    // if !cli.dev {
                     //     info!(
                     //         "Inbound identify event from {}: {:#?}`",
                     //         peer_id,
                     //         info
                     //     );                        
-                    // }
                 },
 
                 SwarmEvent::NewExternalAddrOfPeer {
@@ -370,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
                     }                      
                 },
             
-                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source: peer_id,
                     message,
                     ..
@@ -397,14 +336,14 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 // kademlia events
-                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
                     result: kad::QueryResult::GetClosestPeers(Ok(ok)),
                     ..
                 })) => {
                     info!("Query finished with closest peers: {:#?}", ok.peers);
                 },
 
-                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
                     result:
                         kad::QueryResult::GetClosestPeers(Err(kad::GetClosestPeersError::Timeout {
                             ..
@@ -414,7 +353,7 @@ async fn main() -> anyhow::Result<()> {
                     warn!("Query for closest peers timed out");
                 },
 
-                // SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                // SwarmEvent::Behaviour(GlobalBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
                 //     result: kad::QueryResult::GetProviders(Ok(found_providers)),
                 //     ..
                 // })) => {
@@ -422,7 +361,7 @@ async fn main() -> anyhow::Result<()> {
                 // },
 
                 // requests
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: _peer_id,
                     message: request_response::Message::Request {
                         request,
@@ -440,7 +379,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 // responses
-                SwarmEvent::Behaviour(MyBehaviourEvent::ReqResp(request_response::Event::Message {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: client_peer_id,
                     message: request_response::Message::Response {
                         response,
@@ -527,7 +466,7 @@ async fn main() -> anyhow::Result<()> {
 
                 // <blob transfer>
                 // requests
-                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::Message {
                     peer: peer_id,
                     message: request_response::Message::Request {
                         request: blob_transfer::Request(blob_hash),
@@ -571,7 +510,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 // responses
-                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::Message {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::Message {
                     peer: peer_id,
                     message: request_response::Message::Response {
                         response: blob_transfer::Response(blob),
@@ -647,7 +586,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 // inbound
-                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::InboundFailure {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::InboundFailure {
                     peer: peer_id,
                     connection_id,
                     request_id,
@@ -663,7 +602,7 @@ async fn main() -> anyhow::Result<()> {
                 },
 
                 // outbound
-                SwarmEvent::Behaviour(MyBehaviourEvent::BlobTransfer(request_response::Event::OutboundFailure {
+                SwarmEvent::Behaviour(GlobalBehaviourEvent::BlobTransfer(request_response::Event::OutboundFailure {
                     peer: peer_id,
                     connection_id,
                     request_id,
