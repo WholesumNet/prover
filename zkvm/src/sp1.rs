@@ -8,39 +8,22 @@ use log::info;
 use anyhow;
 use bincode;
 use sp1_sdk::{
-    SP1Stdin, Prover,
-    ProverClient, CpuProver,
-    SP1ProvingKey, SP1VerifyingKey, 
+    SP1Stdin, 
+    SP1VerifyingKey, 
     SP1ProofWithPublicValues,
 };
 
-#[allow(unused)]
 pub struct SP1Handle {
-    client: CpuProver,
-    
-    subblock_pk: SP1ProvingKey,
-    subblock_vk: SP1VerifyingKey,
-    
-    agg_pk: SP1ProvingKey,
-    agg_vk: SP1VerifyingKey,
+    subblock_vk: SP1VerifyingKey,    
 }
 
 impl SP1Handle {
-    pub fn new() -> anyhow::Result<Self> {
-        let cpu_client = ProverClient::builder().cpu().build();
-        // subblock
-        let subblock_elf = fs::read("../elfs/subblock_elf.bin")?;
-        let (subblock_pk, subblock_vk) = cpu_client.setup(&subblock_elf);
-        // agg
-        let agg_elf = fs::read("../elfs/agg_elf.bin")?;
-        let (agg_pk, agg_vk) = cpu_client.setup(&agg_elf);
-
-        Ok(Self {
-            client: cpu_client,
-            subblock_pk: subblock_pk,
-            subblock_vk: subblock_vk,
-            agg_pk: agg_pk,
-            agg_vk: agg_vk
+    pub fn new() -> anyhow::Result<Self> {       
+        let vk: SP1VerifyingKey = bincode::deserialize(
+            &fs::read("../elfs/subblock_vk.bin")?
+        )?;
+        Ok(Self {            
+            subblock_vk: vk,
         })
     }
 
@@ -125,18 +108,16 @@ impl SP1Handle {
         if !status.success() {
             anyhow::bail!("Proving failed: {status:?}")
         }        
-        let agg_proof = SP1ProofWithPublicValues::load(
+        info!(
+            "Proving is finished in `{:.3}s`.",
+            start.elapsed().as_secs_f64()
+        );        
+        let proof_bytes = fs::read(
             format!(
                 "../sp1-cluster/proof-{}.bin",
                 batch_id
             )
-        )?;
-        let dur = start.elapsed();
-        info!("Proving is finished in `{:.3}s`.", dur.as_secs_f64());
-        info!("Verifying the aggregation proof.");
-        self.client.verify(&agg_proof, &self.agg_vk)?;
-        info!("Viola, verified!");
-        let proof_bytes = bincode::serialize(&agg_proof)?;
+        )?;        
         Ok(proof_bytes)
     }
 }
