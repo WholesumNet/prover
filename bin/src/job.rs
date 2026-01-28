@@ -1,5 +1,5 @@
 use std::collections::{
-    BTreeMap, HashSet
+    HashSet
 };
 use libp2p::PeerId;
 use zkvm::JobKind;
@@ -17,7 +17,7 @@ pub struct Job {
 
     // must be pulled before proving can start
     // <index, hash>
-    prerequisites: BTreeMap<usize, u128>,
+    prerequisites: HashSet<u128>,
     // helper map to manage prerequisites
     pending_prerequisites: HashSet<u128>,    
 }
@@ -29,7 +29,7 @@ impl Job {
             id: id,
             owner: owner,
             kind: kind,
-            prerequisites: BTreeMap::new(),
+            prerequisites: HashSet::new(),
             pending_prerequisites: HashSet::new(),
         }
     }
@@ -41,7 +41,7 @@ impl Job {
     }
 
     pub fn prerequisites(&self) -> Vec<u128> {
-        self.prerequisites.values().cloned().collect()
+        self.prerequisites.iter().cloned().collect()
     }
 
     // are all prerequisites fullfilled?
@@ -49,9 +49,11 @@ impl Job {
         self.pending_prerequisites.is_empty()
     }
 
-    pub fn add_prerequisite(&mut self, index: usize, hash: u128) {
-        self.prerequisites.insert(index, hash);
-        let _ = self.pending_prerequisites.insert(hash);        
+    pub fn add_prerequisite(&mut self, hash: u128, fulfilled: bool) {
+        self.prerequisites.insert(hash);
+        if !fulfilled {
+            let _ = self.pending_prerequisites.insert(hash);
+        }
     }
 
     pub fn is_a_prerequisite(&self, hash: u128) -> bool {

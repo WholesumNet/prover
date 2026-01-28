@@ -328,7 +328,8 @@ async fn main() -> anyhow::Result<()> {
                     }
                     // info!("Gossip: need `{need:?}`");
                     let _req_id = swarm
-                        .behaviour_mut().req_resp
+                        .behaviour_mut()
+                        .req_resp
                         .send_request(
                             &peer_id,
                             Would,
@@ -364,26 +365,20 @@ async fn main() -> anyhow::Result<()> {
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: _peer_id,
                     message: request_response::Message::Request {
-                        request,
+                        // request,
                         // channel,
                         // request_id,
                         ..
                     },
                     ..
-                })) => {                
-                    match request {
-                        _ => {
-                            continue
-                        }                        
-                    };
-                },
+                })) => {},
 
                 // responses
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: client_peer_id,
                     message: request_response::Message::Response {
                         response,
-                        //response_id,
+                        //request_id,
                         ..
                     },
                     ..
@@ -416,47 +411,38 @@ async fn main() -> anyhow::Result<()> {
                                             kind_str
                                         );
                                         //@ check if I have the proof already
-                                        let mut get_blob_info_list = Vec::new();
-                                        for (i, input_token) in prove_details.tokens.iter().enumerate() {
-                                            job.add_prerequisite(i, input_token.hash);
-                                            if blob_store.contains_key(&input_token.hash) {
-                                                job.set_prerequisite_as_fulfilled(input_token.hash);
+                                        for input_token in prove_details.tokens.into_iter() {
+                                            let fulfilled = blob_store.contains_key(&input_token.hash);
+                                            job.add_prerequisite(input_token.hash, fulfilled);
+                                            if fulfilled {
                                                 info!(
-                                                    "Prerequisite blob(`{}`) is alreay fullfilled.",
+                                                    "Prerequisite blob(`{}`) is already fulfilled.",
                                                     input_token.hash
                                                 );
-                                            } else {                                                
-                                                if let Some(owner_peer_id) = peer_id_from_bytes(&input_token.owner) {
+                                            } else {
+                                                if let Some(owner_peer_id) = peer_id_from_bytes(&input_token.owner) {                                                    
+                                                    //@ retry mechanism?
+                                                    let req_id = swarm
+                                                        .behaviour_mut()
+                                                        .blob_transfer
+                                                        .send_request(
+                                                            &owner_peer_id,
+                                                            blob_transfer::Request(input_token.hash.to_string())
+                                                        );
                                                     info!(
-                                                        "Need to request outstanding blob(`{}`) from `{}`.",
+                                                        "Requested prerequisite blob(`{}`) from `{}`. req_id: `{}`.",
                                                         input_token.hash,
-                                                        owner_peer_id
-                                                    );
-                                                    get_blob_info_list.push((input_token.hash, owner_peer_id));
+                                                        owner_peer_id,
+                                                        req_id
+                                                    );                                                                                                        
                                                 } else {
-                                                    warn!("Job will never run due to missing owner PeerId.");
-                                                    continue
+                                                    warn!("Failed to decode owner PeerId. Job cannot start due to an unrecoverable missing prerequisite.");
+                                                    continue;
                                                 }
                                             }                                             
                                         }
-                                        pending_jobs.insert(prove_details.id, job);
-                                        // request blob info
-                                        //@ retry mechanism?
-                                        for (hash, owner_peer_id) in get_blob_info_list.into_iter() {
-                                            let req_id = swarm
-                                                .behaviour_mut()
-                                                .blob_transfer
-                                                .send_request(
-                                                    &owner_peer_id,
-                                                    blob_transfer::Request(hash.to_string())
-                                                );
-                                            info!(
-                                                "Requested outstanding blob(`{}`) from `{}`. req_id: `{:?}`.",
-                                                hash,
-                                                owner_peer_id,
-                                                req_id
-                                            );
-                                        }
+                                        //@ what if job is already ready?
+                                        pending_jobs.insert(prove_details.id, job);                                        
                                     },
                                 }
                             };                            
@@ -565,6 +551,7 @@ async fn main() -> anyhow::Result<()> {
                                             "Input(`{}`) is not available, job cannot start.",
                                             blob_hash
                                         );
+                                        //@ next? 
                                     }
                                 }
                                 info!(
