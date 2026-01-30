@@ -13,7 +13,6 @@ use std::{
     env,
     collections::{
         HashMap,
-        VecDeque
     },
     // future::IntoFuture,
     thread,
@@ -67,10 +66,8 @@ use peyk::{
         NeedKind,
         // InputToken,
         ProofToken,
-    },
-    protocol::Request::{
-        Would,
-    },
+        Request::Would
+    },    
     blob_transfer
 };
 
@@ -97,18 +94,15 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
-        .init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
     info!("<-> `Prover` agent for Wholesum network <->");
    
     // setup mongodb
     // let _db_client = mongodb_setup("mongodb://localhost:27017").await?;
 
-    // maintain jobs
-    let mut active_job = None;
-    let mut ready_jobs = VecDeque::new();
-    let mut pending_jobs = HashMap::new();
+    // the current job
+    let mut cur_job: Option<Job> = None;    
 
     info!("Initializing SP1.");  
     let sp1_handle = tokio::task::spawn_blocking(|| 
@@ -314,6 +308,9 @@ async fn main() -> anyhow::Result<()> {
                     message,
                     ..
                 })) => {
+                    if cur_job.is_some() {
+                        continue;
+                    }
                     let _need: NeedKind = match bincode::deserialize(&message.data) {
                         Ok(n) => n,
 
@@ -323,17 +320,13 @@ async fn main() -> anyhow::Result<()> {
                         },
 
                     };
-                    if !ready_jobs.is_empty() {
-                        continue;
-                    }
-                    // info!("Gossip: need `{need:?}`");
                     let _req_id = swarm
                         .behaviour_mut()
                         .req_resp
                         .send_request(
                             &peer_id,
                             Would,
-                        );                     
+                        );
                 },
 
                 // kademlia events
@@ -384,7 +377,10 @@ async fn main() -> anyhow::Result<()> {
                     ..
                 })) => {                
                     match response {
-                        protocol::Response::Job(compute_job) => {                            
+                        protocol::Response::Job(compute_job) => {
+                            if cur_job.is_some() {
+                                continue;
+                            }
                             match compute_job.kind {                                
                                 protocol::JobKind::SP1(sp1_op) => match sp1_op {                                    
                                     protocol::SP1Op::Prove(prove_details) => {
@@ -436,13 +432,12 @@ async fn main() -> anyhow::Result<()> {
                                                         req_id
                                                     );                                                                                                        
                                                 } else {
-                                                    warn!("Failed to decode owner PeerId. Job cannot start due to an unrecoverable missing prerequisite.");
+                                                    warn!("Failed to decode owner PeerId, aborting job.");
                                                     continue;
                                                 }
                                             }                                             
                                         }
-                                        //@ what if job is already ready?
-                                        pending_jobs.insert(prove_details.id, job);                                        
+                                        cur_job = Some(job);                                    
                                     },
                                 }
                             };                            
@@ -500,75 +495,70 @@ async fn main() -> anyhow::Result<()> {
                     peer: peer_id,
                     message: request_response::Message::Response {
                         response: blob_transfer::Response(blob),
-                        // response_id,
+                        // request_id,
                         ..
                     },
                     ..
-                })) => {                
-                    let mut ready_job = None;
-                    let blob_hash = xxh3_128(&blob);
-                    if let Some(job) = pending_jobs
-                        .values_mut()
-                        .find(|j| j.is_a_prerequisite(blob_hash))
-                    {
-                        blob_store.insert(blob_hash, blob);
-                        job.set_prerequisite_as_fulfilled(blob_hash);
-                        info!(
-                            "Prerequisite blob(`{}`) of job(`{}`) is fullfilled.",
-                            blob_hash,
-                            job.get_batch_id()
-                        );
-                        if job.is_ready() {
-                            let prove_id = match job.kind {
-                                zkvm::JobKind::SP1(_, id) => id,                                        
-                            };
-                            ready_job = Some(prove_id);
-                        }
-                    } else {
+                })) => {
+                    if cur_job.is_none() {
                         warn!(
-                            "Received unsolicited blob(`{}`) from `{}`.",
+                            "Received unsolicited blob from `{}`.",
+                            peer_id
+                        );
+                        continue;                        
+                    }
+                    let blob_hash = xxh3_128(&blob);
+                    let job = cur_job.as_mut().unwrap();
+                    if !job.is_a_prerequisite(blob_hash) {
+                        warn!(
+                            "Blob(`{}`) `{}` is not a prerequisite.",
                             blob_hash,
                             peer_id
                         );
                         continue;
                     }
-                    // run it
-                    if let Some(id) = ready_job {
-                        ready_jobs.push_back(pending_jobs.remove(&id).unwrap());
+
+                    blob_store.insert(blob_hash, blob);
+                    job.set_prerequisite_as_fulfilled(blob_hash);
+                    info!(
+                        "Prerequisite blob(`{}`) of job(`{}`) is fullfilled.",
+                        blob_hash,
+                        job.get_batch_id()
+                    );
+                    if job.is_ready() {                        
                         info!(
                             "Job(`{}`) is ready to run.",
-                            id
+                            job.get_batch_id()
                         );
-                        if active_job.is_none() {
-                            // run it
-                            if let Some(job) = ready_jobs.pop_front() {
-                                let mut inputs = Vec::new();
-                                for blob_hash in job.prerequisites().into_iter() {
-                                    if let Some(blob) = blob_store.get(&blob_hash) {
-                                        inputs.push(blob.clone());
-                                    } else {
-                                        warn!(
-                                            "Input(`{}`) is not available, job cannot start.",
-                                            blob_hash
-                                        );
-                                        //@ next? 
-                                    }
-                                }
-                                info!(
-                                    "Prove started for job(`{}`).",
-                                    job.get_batch_id()
-                                );
-                                run_futures.push(
-                                    spawn_run(
-                                        Arc::clone(&sp1_handle),
-                                        job.get_batch_id(),
-                                        inputs,
-                                        job.kind.clone()
-                                    )
-                                );                                        
-                                active_job = Some(job);
-                            }
-                        }
+                        let (num_prerequisites, prerequisites) = {
+                            let p = job.prerequisites();
+                            (p.len(), p)
+                        };
+                        let inputs: Vec<_> = prerequisites
+                            .into_iter()
+                            .filter_map(|blob_hash| blob_store.remove(&blob_hash))
+                            .collect();
+                        if inputs.len() != num_prerequisites {
+                            warn!(
+                                "`{}` prerequisites are missing. Job won't start.",
+                                num_prerequisites - inputs.len()
+                            );
+                            //@ remove blobs from blob_store?
+                            cur_job = None;
+                            continue;
+                        }                        
+                        info!(
+                            "Prove is started for job(`{}`).",
+                            job.get_batch_id()
+                        );
+                        run_futures.push(
+                            spawn_run(
+                                Arc::clone(&sp1_handle),
+                                job.get_batch_id(),
+                                inputs,
+                                job.kind.clone()
+                            )
+                        );
                     }
                 },
 
@@ -610,8 +600,8 @@ async fn main() -> anyhow::Result<()> {
             },
 
             result = run_futures.select_next_some() => {                
+                let job = cur_job.take().unwrap();
                 if let Err(e) = result {
-                    let job: Job = active_job.take().unwrap();
                     warn!(
                         "Failed to run job(`{}`): `{:?}`",
                         job.get_batch_id(),
@@ -620,89 +610,47 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 let proof = result.unwrap();
-                let job = active_job.take().unwrap();
-                match job.kind {
-                    zkvm::JobKind::SP1(ref op, sub_id) => {
+                let (is_subblock, batch_id) = match job.kind {
+                    zkvm::JobKind::SP1(ref op, batch_id) => {
                         match op {                            
                             zkvm::SP1Op::ProveSubblock => {
-                                info!(
-                                    "Subblock(`{}`) prove is finished for `{}`",
-                                    sub_id,
-                                    job.id
-                                );
-                                let hash = {
-                                    let hash = xxh3_128(&proof);
-                                    blob_store.insert(hash, proof);
-                                    hash
-                                };
-                                let _req_id = swarm
-                                    .behaviour_mut()
-                                    .req_resp
-                                    .send_request(
-                                        &job.owner,
-                                        protocol::Request::ProofIsReady(
-                                            ProofToken {
-                                                job_id: job.id,
-                                                kind: protocol::ProofKind::Subblock(job.get_batch_id()),
-                                                hash: hash
-                                            }
-                                        )
-                                    );
+                                (true, batch_id)
                             },
 
                             zkvm::SP1Op::ProveAgg => {
-                                info!(
-                                    "Agg(`{}`) prove is finished for `{}`",
-                                    sub_id,
-                                    job.id
-                                );
-                                let hash = {
-                                    let hash = xxh3_128(&proof);
-                                    blob_store.insert(hash, proof);
-                                    hash
-                                };
-                                let _req_id = swarm
-                                    .behaviour_mut()
-                                    .req_resp
-                                    .send_request(
-                                        &job.owner,
-                                        protocol::Request::ProofIsReady(
-                                            ProofToken {
-                                                job_id: job.id,
-                                                kind: protocol::ProofKind::Agg(job.get_batch_id()),
-                                                hash: hash
-                                            }
-                                        )
-                                    );
+                                (false, batch_id)
                             }
-                        };
-                    },
-                }                 
-                
-                // start a new prove
-                if let Some(job) = ready_jobs.pop_front() {
-                    let mut inputs = Vec::new();
-                    for blob_hash in job.prerequisites().into_iter() {
-                        if let Some(blob) = blob_store.get(&blob_hash) {
-                            inputs.push(blob.clone());
-                        } else {
-                            warn!("Input is not available, job cannot start.");
                         }
-                    }     
-                    info!(
-                        "Prove started for job(`{}`).",
-                        job.get_batch_id()
-                    );
-                    run_futures.push(
-                        spawn_run(
-                            Arc::clone(&sp1_handle),
-                            job.get_batch_id(),
-                            inputs,
-                            job.kind.clone()
+                    },
+                };
+                info!(
+                    "{}(`{}`) prove is finished for `{}`.",
+                    if is_subblock { "Subblock" } else { "Agg" },
+                    batch_id,
+                    job.id
+                );
+                let hash = {
+                    let hash = xxh3_128(&proof);
+                    blob_store.insert(hash, proof);
+                    hash
+                };
+                let _req_id = swarm
+                    .behaviour_mut()
+                    .req_resp
+                    .send_request(
+                        &job.owner,
+                        protocol::Request::ProofIsReady(
+                            ProofToken {
+                                job_id: job.id,
+                                kind: if is_subblock {
+                                    protocol::ProofKind::Subblock(batch_id)
+                                } else {
+                                    protocol::ProofKind::Agg(batch_id)
+                                },
+                                hash: hash
+                            }
                         )
-                    );                    
-                    active_job = Some(job);
-                }
+                    );
             },            
         }
     }

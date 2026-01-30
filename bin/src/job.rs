@@ -17,7 +17,7 @@ pub struct Job {
 
     // must be pulled before proving can start
     // <index, hash>
-    prerequisites: HashSet<u128>,
+    prerequisites: Vec<u128>,
     // helper map to manage prerequisites
     pending_prerequisites: HashSet<u128>,    
 }
@@ -29,7 +29,7 @@ impl Job {
             id: id,
             owner: owner,
             kind: kind,
-            prerequisites: HashSet::new(),
+            prerequisites: Vec::new(),
             pending_prerequisites: HashSet::new(),
         }
     }
@@ -41,7 +41,7 @@ impl Job {
     }
 
     pub fn prerequisites(&self) -> Vec<u128> {
-        self.prerequisites.iter().cloned().collect()
+        self.prerequisites.clone()
     }
 
     // are all prerequisites fullfilled?
@@ -50,7 +50,7 @@ impl Job {
     }
 
     pub fn add_prerequisite(&mut self, hash: u128, fulfilled: bool) {
-        self.prerequisites.insert(hash);
+        self.prerequisites.push(hash);
         if !fulfilled {
             let _ = self.pending_prerequisites.insert(hash);
         }
