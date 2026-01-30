@@ -5,7 +5,10 @@ use std::{
     process::Command
 };
 use log::info;
-use anyhow;
+use anyhow::{
+    Result,
+    Context
+};
 use bincode;
 use sp1_sdk::{
     SP1Stdin, 
@@ -18,9 +21,16 @@ pub struct SP1Handle {
 }
 
 impl SP1Handle {
-    pub fn new() -> anyhow::Result<Self> {       
+    pub fn new() -> Result<Self> { 
+        let subblock_vk_path = "../elfs/subblock_vk.bin";      
         let vk: SP1VerifyingKey = bincode::deserialize(
-            &fs::read("../elfs/subblock_vk.bin")?
+            &fs::read(subblock_vk_path)
+                .with_context(||
+                    format!(
+                        "Subblock VK file was not found in `{}`.",
+                        subblock_vk_path
+                    )
+                )?
         )?;
         Ok(Self {            
             subblock_vk: vk,
@@ -32,7 +42,7 @@ impl SP1Handle {
         &self,
         batch_id: u128,
         stdin_blob: Vec<u8>,
-    ) -> anyhow::Result<Vec<u8>> {            
+    ) -> Result<Vec<u8>> {            
         info!("Proving subblock is initiated.");                
         let start = Instant::now();
         let stdin_filename = format!(
@@ -54,12 +64,17 @@ impl SP1Handle {
         if !status.success() {
             anyhow::bail!("Proving failed: {status:?}")
         }
-        let proof = fs::read(
-            format!(
-                "../sp1-cluster/proof-{}.bin",
-                batch_id
-            )
-        )?;
+        let proof_path = format!(
+            "../sp1-cluster/proof-{}.bin",
+            batch_id
+        );
+        let proof = fs::read(&proof_path)
+            .with_context(||
+                format!(
+                    "Subblock proof file was not found in `{}`.",
+                    proof_path
+                )
+            )?;
         let dur = start.elapsed();
         info!("Proving is finished in `{:.3}s`.", dur.as_secs_f64());
         Ok(proof)
@@ -71,7 +86,7 @@ impl SP1Handle {
         batch_id: u128,
         stdin_blob: Vec<u8>,
         subblock_proofs: Vec<Vec<u8>>,
-    ) -> anyhow::Result<Vec<u8>> {    
+    ) -> Result<Vec<u8>> {    
         info!("Proving aggregation is initiated.");
         let start = Instant::now();        
         let mut stdin: SP1Stdin = bincode::deserialize(&stdin_blob)?;
@@ -111,13 +126,18 @@ impl SP1Handle {
         info!(
             "Proving is finished in `{:.3}s`.",
             start.elapsed().as_secs_f64()
-        );        
-        let proof_bytes = fs::read(
-            format!(
-                "../sp1-cluster/proof-{}.bin",
-                batch_id
-            )
-        )?;        
+        );         
+        let proof_path = format!(
+            "../sp1-cluster/proof-{}.bin",
+            batch_id
+        );       
+        let proof_bytes = fs::read(&proof_path)
+            .with_context(||
+                format!(
+                    "Agg proof file was not found in `{}`.",
+                    proof_path
+                )
+            )?;        
         Ok(proof_bytes)
     }
 }
