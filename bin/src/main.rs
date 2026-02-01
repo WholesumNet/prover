@@ -9,7 +9,10 @@ use futures::{
 };
 
 use std::{
-    time::Duration,
+    time::{
+        Instant,
+        Duration
+    },
     env,
     collections::{
         HashMap,
@@ -48,6 +51,7 @@ use libp2p::{
     PeerId,
     multiaddr::Protocol,
 };
+use rand::prelude::*;
 // use mongodb::{
 //     bson::{
 //         doc,
@@ -63,10 +67,7 @@ use peyk::{
     p2p::GlobalBehaviourEvent,
     protocol,
     protocol::{
-        NeedKind,
-        // InputToken,
         ProofToken,
-        Request::Would
     },    
     blob_transfer
 };
@@ -112,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
     .unwrap();
 
     // pull jobs to completion
-    let mut run_futures = FuturesUnordered::new();
+    let mut prove_futures = FuturesUnordered::new();
 
     // let col_proofs = db_client
     //     .database("wholesum_prover")
@@ -219,16 +220,21 @@ async fn main() -> anyhow::Result<()> {
         )
         .parse()?
     );
+    
     let mut timer_peer_discovery = IntervalStream::new(
         interval(Duration::from_secs(60))
     )
     .fuse();
-    // it takes ~5s for a rtx 3090 to prove 2m cycles
-    let mut timer_satisfy_job_prerequisities = IntervalStream::new(
-        interval(Duration::from_secs(5))
+    
+    let mut timer_express_would_prove = IntervalStream::new(
+        interval(Duration::from_secs(55))
     )
     .fuse();
     
+    let mut rng = rand::rng();
+    let mut recent_insufficient_peers_cry_time = Instant::now();
+    const GOSSIP_CRY_FREQ: u64 = 120; 
+
     loop {
         select! {
             // try to discover new peers
@@ -241,7 +247,25 @@ async fn main() -> anyhow::Result<()> {
                     .get_closest_peers(random_peer_id);
             },
 
-            _i = timer_satisfy_job_prerequisities.select_next_some() => {},
+            _i = timer_express_would_prove.select_next_some() => {
+                let nonce = rng.random::<u8>();
+                let would = bincode::serialize(&protocol::WouldProve(nonce))
+                    .unwrap();
+                if let Err(e) = swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic.clone(), would)
+                {
+                    let now = Instant::now();
+                    if now.duration_since(recent_insufficient_peers_cry_time).as_secs() > GOSSIP_CRY_FREQ {
+                        warn!(
+                            "Would prove gossip failed, error: `{:?}`",
+                            e
+                        );
+                        recent_insufficient_peers_cry_time = now;
+                    }
+                }
+            },
 
             // libp2p events
             event = swarm.select_next_some() => match event {
@@ -302,32 +326,6 @@ async fn main() -> anyhow::Result<()> {
                             .add_address(&peer_id, address);
                     }                      
                 },
-            
-                SwarmEvent::Behaviour(GlobalBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                    propagation_source: peer_id,
-                    message,
-                    ..
-                })) => {
-                    if cur_job.is_some() {
-                        continue;
-                    }
-                    let _need: NeedKind = match bincode::deserialize(&message.data) {
-                        Ok(n) => n,
-
-                        Err(e) => {
-                            warn!("Gossip(need) message decode error: `{e:?}`");
-                            continue;
-                        },
-
-                    };
-                    let _req_id = swarm
-                        .behaviour_mut()
-                        .req_resp
-                        .send_request(
-                            &peer_id,
-                            Would,
-                        );
-                },
 
                 // kademlia events
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
@@ -352,97 +350,103 @@ async fn main() -> anyhow::Result<()> {
                 //     ..
                 // })) => {
                     
-                // },
+                // },                
 
                 // requests
                 SwarmEvent::Behaviour(GlobalBehaviourEvent::ReqResp(request_response::Event::Message {
-                    peer: _peer_id,
-                    message: request_response::Message::Request {
-                        // request,
-                        // channel,
-                        // request_id,
-                        ..
-                    },
-                    ..
-                })) => {},
-
-                // responses
-                SwarmEvent::Behaviour(GlobalBehaviourEvent::ReqResp(request_response::Event::Message {
                     peer: client_peer_id,
-                    message: request_response::Message::Response {
-                        response,
+                    message: request_response::Message::Request {
+                        request: protocol::Request::Job(compute_job),
+                        channel,
                         //request_id,
                         ..
                     },
                     ..
-                })) => {                
-                    match response {
-                        protocol::Response::Job(compute_job) => {
-                            if cur_job.is_some() {
-                                continue;
-                            }
-                            match compute_job.kind {                                
-                                protocol::JobKind::SP1(sp1_op) => match sp1_op {                                    
-                                    protocol::SP1Op::Prove(prove_details) => {
-                                        let (op, kind_str) = match prove_details.elf_kind {
-                                            protocol::ELFKind::Subblock => (
-                                                zkvm::SP1Op::ProveSubblock,
-                                                "Subblock"
-                                            ),
-
-                                            protocol::ELFKind::Agg => (
-                                                zkvm::SP1Op::ProveAgg,
-                                                "Aggregation"
-                                            )
-                                        };
-                                        let mut job = Job::new(
-                                            compute_job.id,
-                                            client_peer_id.clone(),
-                                            zkvm::JobKind::SP1(op, prove_details.id)
-                                        );
-                                        info!(
-                                            "Received Prove job('{}') from `{}`: `{}`.",
-                                            job.get_batch_id(),
-                                            client_peer_id,
-                                            kind_str
-                                        );
-                                        //@ check if I have the proof already
-                                        for input_token in prove_details.tokens.into_iter() {
-                                            let fulfilled = blob_store.contains_key(&input_token.hash);
-                                            job.add_prerequisite(input_token.hash, fulfilled);
-                                            if fulfilled {
-                                                info!(
-                                                    "Prerequisite blob(`{}`) is already fulfilled.",
-                                                    input_token.hash
-                                                );
-                                            } else {
-                                                if let Some(owner_peer_id) = peer_id_from_bytes(&input_token.owner) {                                                    
-                                                    //@ retry mechanism?
-                                                    let req_id = swarm
-                                                        .behaviour_mut()
-                                                        .blob_transfer
-                                                        .send_request(
-                                                            &owner_peer_id,
-                                                            blob_transfer::Request(input_token.hash.to_string())
-                                                        );
-                                                    info!(
-                                                        "Requested prerequisite blob(`{}`) from `{}`. req_id: `{}`.",
-                                                        input_token.hash,
-                                                        owner_peer_id,
-                                                        req_id
-                                                    );                                                                                                        
-                                                } else {
-                                                    warn!("Failed to decode owner PeerId, aborting job.");
-                                                    continue;
-                                                }
-                                            }                                             
-                                        }
-                                        cur_job = Some(job);                                    
-                                    },
-                                }
-                            };                            
-                        }
+                })) => {
+                    if cur_job.is_some() {
+                        let _ = swarm
+                            .behaviour_mut()
+                            .req_resp
+                            .send_response(
+                                channel,
+                                protocol::Response::Reject
+                            );
+                        continue;
                     }
+                    match compute_job.kind {                                
+                        protocol::JobKind::SP1(sp1_op) => match sp1_op {                                    
+                            protocol::SP1Op::Prove(prove_details) => {
+                                let (op, kind_str) = match prove_details.elf_kind {
+                                    protocol::ELFKind::Subblock => (
+                                        zkvm::SP1Op::ProveSubblock,
+                                        "Subblock"
+                                    ),
+
+                                    protocol::ELFKind::Agg => (
+                                        zkvm::SP1Op::ProveAgg,
+                                        "Aggregation"
+                                    )
+                                };
+                                let mut job = Job::new(
+                                    compute_job.id,
+                                    client_peer_id.clone(),
+                                    zkvm::JobKind::SP1(op, prove_details.id)
+                                );
+                                info!(
+                                    "Received Prove job('{}') from `{}`: `{}`.",
+                                    job.get_batch_id(),
+                                    client_peer_id,
+                                    kind_str
+                                );
+                                //@ check if I have the proof already
+                                for input_token in prove_details.tokens.into_iter() {
+                                    let fulfilled = blob_store.contains_key(&input_token.hash);
+                                    job.add_prerequisite(input_token.hash, fulfilled);
+                                    if fulfilled {
+                                        info!(
+                                            "Prerequisite blob(`{}`) is already fulfilled.",
+                                            input_token.hash
+                                        );
+                                    } else {
+                                        if let Some(owner_peer_id) = peer_id_from_bytes(&input_token.owner) {                                                    
+                                            //@ retry mechanism?
+                                            let req_id = swarm
+                                                .behaviour_mut()
+                                                .blob_transfer
+                                                .send_request(
+                                                    &owner_peer_id,
+                                                    blob_transfer::Request(input_token.hash.to_string())
+                                                );
+                                            info!(
+                                                "Requested prerequisite blob(`{}`) from `{}`. req_id: `{}`.",
+                                                input_token.hash,
+                                                owner_peer_id,
+                                                req_id
+                                            );                                                                                                        
+                                        } else {
+                                            warn!("Failed to decode owner PeerId, aborting job.");
+                                            // let _ = swarm
+                                            //     .behaviour_mut()
+                                            //     .req_resp
+                                            //     .send_response(
+                                            //         channel,
+                                            //         protocol::Response::Reject
+                                            //     );
+                                            continue;
+                                        }
+                                    }
+                                }
+                                cur_job = Some(job);
+                                let _ = swarm
+                                    .behaviour_mut()
+                                    .req_resp
+                                    .send_response(
+                                        channel,
+                                        protocol::Response::Accept
+                                    );                                    
+                            },
+                        }
+                    };
                 },
 
                 // <blob transfer>
@@ -543,7 +547,6 @@ async fn main() -> anyhow::Result<()> {
                                 "`{}` prerequisites are missing. Job won't start.",
                                 num_prerequisites - inputs.len()
                             );
-                            //@ remove blobs from blob_store?
                             cur_job = None;
                             continue;
                         }                        
@@ -551,7 +554,7 @@ async fn main() -> anyhow::Result<()> {
                             "Prove is started for job(`{}`).",
                             job.get_batch_id()
                         );
-                        run_futures.push(
+                        prove_futures.push(
                             spawn_run(
                                 Arc::clone(&sp1_handle),
                                 job.get_batch_id(),
@@ -599,7 +602,7 @@ async fn main() -> anyhow::Result<()> {
                 },
             },
 
-            result = run_futures.select_next_some() => {                
+            result = prove_futures.select_next_some() => {                
                 let job = cur_job.take().unwrap();
                 if let Err(e) = result {
                     warn!(

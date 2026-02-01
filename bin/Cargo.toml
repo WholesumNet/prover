@@ -21,7 +21,6 @@ rand.workspace = true
 mongodb.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
-
 zkvm = {path = "../zkvm"}
 
 peyk.workspace = true
